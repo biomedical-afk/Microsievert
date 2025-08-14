@@ -1,6 +1,3 @@
-# app.py — Sistema de Gestión de Dosimetría
-# Salida: SOLO CSV UTF-8 (Comma delimited) con BOM y CRLF — solo la tabla
-
 import streamlit as st
 import pandas as pd
 import requests
@@ -301,6 +298,7 @@ if st.button("✅ Generar CSV UTF-8 (Comma delimited)", disabled=not(dosis_file 
         st.error(f"Error generando CSV: {e}")
 
 st.markdown("<div style='color:#6c757d;text-align:center;font-size:12px;'>Sistema de Gestión de Dosimetría - MicroSievert</div>", unsafe_allow_html=True)
+
 
 
 
