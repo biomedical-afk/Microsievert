@@ -1,4 +1,4 @@
-# app.py — Sistema de Gestión de Dosimetría (versión corregida)
+# app.py — Sistema de Gestión de Dosimetría (soporta DOSIMETRO 1–5 y PERIODO 1–5)
 
 import streamlit as st
 import pandas as pd
@@ -15,12 +15,18 @@ import re
 # =========================
 st.set_page_config(page_title="Sistema de Gestión de Dosimetría", layout="centered")
 
-# --- COLORES DE LA APP ---
+# =========================
+# PARÁMETROS
+# =========================
 COLOR_PRIMARIO   = "#1c6758"
 COLOR_SECUNDARIO = "#3d8361"
 COLOR_FONDO      = "#f8f9fa"
 COLOR_TEXTO      = "#222"
 COLOR_FOOTER     = "#6c757d"
+
+# Cantidad máxima de campos a considerar
+MAX_DOSIMETROS = 5
+MAX_PERIODOS   = 5
 
 # --- LOGIN SIMPLE ---
 USUARIOS = {
@@ -28,6 +34,9 @@ USUARIOS = {
     "usuario1": "password123"
 }
 
+# =========================
+# LOGIN
+# =========================
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
 
@@ -46,13 +55,12 @@ if not st.session_state["autenticado"]:
             st.error("Usuario o contraseña incorrectos.")
     st.stop()  # Detiene aquí si no ha iniciado sesión
 
-# --- OPCIÓN CERRAR SESIÓN ---
 if st.sidebar.button("Cerrar sesión"):
     st.session_state["autenticado"] = False
     st.rerun()
 
 # =========================
-# INTERFAZ PRINCIPAL
+# INTERFAZ
 # =========================
 st.markdown(
     f"""
@@ -73,41 +81,60 @@ with col2:
 # UTILIDADES
 # =========================
 def _try_read_csv(file):
-    """Intenta leer CSV con ; y ,"""
+    """Intenta leer CSV con ; y, si falla, con ,"""
     try:
         return pd.read_csv(file, sep=';', engine='python')
     except Exception:
         file.seek(0)
         return pd.read_csv(file)
 
-def normalizar_cols_participantes(df):
-    # Pasar a mayúsculas, quitar espacios del inicio/fin
-    df.columns = [c.strip().upper() for c in df.columns]
-    return df
-
-def leer_participantes(f):
+def leer_participantes(f) -> pd.DataFrame:
     df = pd.read_excel(f)
-    df = normalizar_cols_participantes(df)
+    # Normalizar nombres de columnas
+    df.columns = [c.strip().upper() for c in df.columns]
 
-    # Campos que solemos usar; si no están, se crean vacíos para evitar KeyError
-    for col in ["DOSIMETRO 1", "DOSIMETRO 2", "NOMBRE", "APELLIDO", "CÉDULA", "COMPAÑÍA", "PERIODO 1", "PERIODO 2"]:
-        if col not in df.columns:
-            df[col] = ""
+    # Campos base
+    base_cols = ["NOMBRE", "APELLIDO", "CÉDULA", "COMPAÑÍA"]
+    for c in base_cols:
+        if c not in df.columns:
+            df[c] = ""
 
-    # Limpieza básica
-    for c in ["DOSIMETRO 1", "DOSIMETRO 2"]:
-        df[c] = df[c].astype(str).str.strip().str.upper().replace({"NAN": ""})
+    # DOSIMETROS 1..5
+    for i in range(1, MAX_DOSIMETROS + 1):
+        c = f"DOSIMETRO {i}"
+        if c not in df.columns:
+            df[c] = ""
+        df[c] = (
+            df[c]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .replace({"NAN": ""})
+        )
+
+    # PERIODOS 1..5
+    for i in range(1, MAX_PERIODOS + 1):
+        c = f"PERIODO {i}"
+        if c not in df.columns:
+            df[c] = ""
+        df[c] = (
+            df[c]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .replace({"NAN": ""})
+        )
 
     return df
 
-def leer_dosis(f):
-    # Lee Excel o CSV y normaliza columnas
+def leer_dosis(f) -> pd.DataFrame:
+    # Lee Excel o CSV
     if f.name.lower().endswith(".csv"):
         df = _try_read_csv(f)
     else:
         df = pd.read_excel(f)
 
-    # Estandarizar columnas a minúsculas sin espacios y sin paréntesis/puntos molestos
+    # Estandarizar nombres de columnas
     df.columns = (
         df.columns
         .str.strip()
@@ -117,53 +144,51 @@ def leer_dosis(f):
         .str.replace(')', '', regex=False)
     )
 
-    # Mapear varias variantes a un nombre canónico
     rename_map = {
-        # dosímetro y timestamp
+        # identificador de dosímetro
         "dosimeter": "dosimeter",
         "serial": "dosimeter",
         "codigo": "dosimeter",
+        "codigodosimetro": "dosimeter",
+        # fecha/timestamp
         "timestamp": "timestamp",
         "fecha": "timestamp",
         "fechalectura": "timestamp",
-
-        # dosis (soportar *_corr. y sin _corr, y hp0.07)
+        # dosis
         "hp10dosecorr.": "hp10",
         "hp10dosecorr": "hp10",
         "hp10dose": "hp10",
-        "hp007dosecorr.": "hp007",
         "hp0.07dosecorr.": "hp007",
         "hp0.07dosecorr": "hp007",
-        "hp007dose": "hp007",
         "hp0.07dose": "hp007",
+        "hp007dosecorr.": "hp007",
+        "hp007dosecorr": "hp007",
+        "hp007dose": "hp007",
         "hp3dosecorr.": "hp3",
         "hp3dosecorr": "hp3",
         "hp3dose": "hp3",
     }
-
-    # Aplicar renombrado solo a las columnas presentes
     present_map = {k: v for k, v in rename_map.items() if k in df.columns}
     df = df.rename(columns=present_map)
 
-    # Validaciones mínimas
     if "dosimeter" not in df.columns:
-        raise ValueError("El archivo de Dosis no contiene la columna del dosímetro (ej. 'dosimeter', 'serial' o 'codigo').")
+        raise ValueError("El archivo de Dosis no contiene la columna del dosímetro (p. ej. 'dosimeter', 'serial', 'codigo').")
 
     # Asegurar columnas de dosis
     for dose_col in ["hp10", "hp007", "hp3"]:
         if dose_col not in df.columns:
             df[dose_col] = 0.0
 
-    # Normalizar tipos/cadenas clave
+    # Normalizar tipos
     df["dosimeter"] = df["dosimeter"].astype(str).str.strip().str.upper()
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
-    # Dejar solo columnas útiles
+    # Mantener columnas útiles
     keep = ["dosimeter", "timestamp", "hp10", "hp007", "hp3"]
     df = df[[c for c in keep if c in df.columns]]
 
-    # Eliminar duplicados por dosimeter quedándonos con el más reciente
+    # Dedupe: conservar lectura más reciente por dosímetro
     if "timestamp" in df.columns:
         df = df.sort_values("timestamp").drop_duplicates(subset=["dosimeter"], keep="last")
     else:
@@ -427,18 +452,20 @@ if participantes_file:
     try:
         dfp = leer_participantes(participantes_file)
         periodos = set()
-        for col in ['PERIODO 1', 'PERIODO 2']:
-            if col in dfp.columns:
-                periodos.update(
-                    dfp[col].dropna().astype(str).str.strip().str.upper()
-                )
-        periodo_opciones = sorted([p for p in periodos if p and p != ''])
+        for i in range(1, MAX_PERIODOS + 1):
+            colp = f"PERIODO {i}"
+            if colp in dfp.columns:
+                periodos.update(dfp[colp].dropna().astype(str).str.strip().str.upper())
+        periodo_opciones = sorted([p for p in periodos if p and p != ""])
         if not periodo_opciones:
-            st.info("No se detectaron períodos en el archivo de Participantes. Puedes continuar, pero el reporte mostrará el campo de período con lo que selecciones manualmente.")
+            st.info("No se detectaron períodos en Participantes. Puedes continuar, pero el reporte mostrará el campo de período con lo que selecciones manualmente.")
     except Exception as e:
         st.error(f"Error leyendo participantes: {e}")
 
-periodo_seleccionado = st.selectbox("Selecciona el período a mostrar", options=periodo_opciones if periodo_opciones else ["(sin período)"])
+periodo_seleccionado = st.selectbox(
+    "Selecciona el período a mostrar",
+    options=periodo_opciones if periodo_opciones else ["(sin período)"]
+)
 if periodo_seleccionado == "(sin período)":
     periodo_seleccionado = ""
 
@@ -451,7 +478,7 @@ logo_file = st.file_uploader("Sube el logo de Microsievert (.png, opcional)", ty
 logo_bytes = logo_file.read() if logo_file else None
 
 # =========================
-# BOTÓN GENERAR
+# GENERACIÓN DE REPORTE
 # =========================
 btn_disabled = not (participantes_file and dosis_file)
 
@@ -466,27 +493,23 @@ if st.button("✅ Generar Reporte", disabled=btn_disabled):
         else:
             dfp = leer_participantes(participantes_file)
             dfd = leer_dosis(dosis_file)
-
-            # Índice por dosimeter para acceso rápido
             dfd_index = dfd.set_index("dosimeter")
 
             registros = []
             for _, fila in dfp.iterrows():
-                for cod in [fila.get('DOSIMETRO 1', ''), fila.get('DOSIMETRO 2', '')]:
-                    cod = (cod or "").strip().upper()
+                # Considerar DOSIMETRO 1..5
+                codigos = [(fila.get(f"DOSIMETRO {i}", "") or "").strip().upper()
+                           for i in range(1, MAX_DOSIMETROS + 1)]
+                for cod in codigos:
                     if not cod:
                         continue
                     if cod in dfd_index.index:
                         dosis = dfd_index.loc[cod]
-
                         nombre_raw = f"{fila.get('NOMBRE','')} {fila.get('APELLIDO','')}".strip()
                         nombre = "CONTROL" if "CONTROL" in nombre_raw.upper() else nombre_raw
 
                         fecha = dosis.get('timestamp', None)
-                        if pd.notna(fecha):
-                            fecha_str = pd.to_datetime(fecha, errors='coerce').strftime('%d/%m/%Y %H:%M')
-                        else:
-                            fecha_str = ''
+                        fecha_str = pd.to_datetime(fecha, errors='coerce').strftime('%d/%m/%Y %H:%M') if pd.notna(fecha) else ''
 
                         registros.append({
                             'PERIODO DE LECTURA': periodo_seleccionado,
@@ -504,26 +527,22 @@ if st.button("✅ Generar Reporte", disabled=btn_disabled):
             if not registros:
                 st.warning("No se encontraron coincidencias entre Participantes y Dosis (verifica que los códigos coincidan).")
             else:
-                # Primer registro = CONTROL como base
+                # Tomar el primer registro como CONTROL base
                 base10 = float(registros[0]['Hp(10)'])
                 base07 = float(registros[0]['Hp(0.07)'])
                 base3  = float(registros[0]['Hp(3)'])
 
                 for i, r in enumerate(registros):
                     if i == 0:
-                        # Mostrar el control como valor base
-                        r['Hp(10)']  = f"{base10:.2f}"
+                        r['Hp(10)']   = f"{base10:.2f}"
                         r['Hp(0.07)'] = f"{base07:.2f}"
-                        r['Hp(3)']   = f"{base3:.2f}"
+                        r['Hp(3)']    = f"{base3:.2f}"
                     else:
                         for key, base in [('Hp(10)', base10), ('Hp(0.07)', base07), ('Hp(3)', base3)]:
-                            # Diferencia respecto al control (PM si < 0.005)
                             diff = float(r[key]) - base
                             r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
 
                 df_final = pd.DataFrame(registros)
-
-                # Generar Excel
                 excel_bytes = generar_reporte(df_final, logo_bytes)
 
                 st.success(f"Reporte generado con {len(df_final)} registros.")
@@ -536,7 +555,9 @@ if st.button("✅ Generar Reporte", disabled=btn_disabled):
     except Exception as e:
         st.error(f"Error generando reporte: {e}")
 
-# Footer
+# =========================
+# FOOTER
+# =========================
 st.markdown(
     f"""<div style="color:{COLOR_FOOTER};text-align:center;font-size:12px;">
     Sistema de Gestión de Dosimetría - Microsievert
