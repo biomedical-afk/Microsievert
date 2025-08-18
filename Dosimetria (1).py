@@ -1,228 +1,261 @@
-# app.py — Sistema de Gestión de Dosimetría (soporta DOSIMETRO 1–5 y PERIODO 1–5)
-
-import streamlit as st
+import os
+import re
+import io
+import json
+import time
+import requests
 import pandas as pd
-from io import BytesIO
+import streamlit as st
+from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
-from openpyxl.drawing.image import Image as XLImage
-from datetime import datetime
-import re
 
 # =========================
-# CONFIGURACIÓN DE PÁGINA
+# Configuración de página
 # =========================
-st.set_page_config(page_title="Sistema de Gestión de Dosimetría", layout="centered")
-
-# =========================
-# PARÁMETROS
-# =========================
-COLOR_PRIMARIO   = "#1c6758"
-COLOR_SECUNDARIO = "#3d8361"
-COLOR_FONDO      = "#f8f9fa"
-COLOR_TEXTO      = "#222"
-COLOR_FOOTER     = "#6c757d"
-
-# Cantidad máxima de campos a considerar
-MAX_DOSIMETROS = 5
-MAX_PERIODOS   = 5
-
-# --- LOGIN SIMPLE ---
-USUARIOS = {
-    "Mispanama": "Maxilo2000",  # Cambia estos valores a lo que prefieras
-    "usuario1": "password123"
-}
-
-# =========================
-# LOGIN
-# =========================
-if "autenticado" not in st.session_state:
-    st.session_state["autenticado"] = False
-
-if not st.session_state["autenticado"]:
-    st.markdown(
-        "<h2 style='text-align:center; color:#1c6758'>Acceso al Sistema de Gestión de Dosimetría</h2>",
-        unsafe_allow_html=True
-    )
-    usuario = st.text_input("Usuario", key="login_user")
-    password = st.text_input("Contraseña", type="password", key="login_pass")
-    if st.button("Ingresar"):
-        if usuario in USUARIOS and password == USUARIOS[usuario]:
-            st.session_state["autenticado"] = True
-            st.rerun()
-        else:
-            st.error("Usuario o contraseña incorrectos.")
-    st.stop()  # Detiene aquí si no ha iniciado sesión
-
-if st.sidebar.button("Cerrar sesión"):
-    st.session_state["autenticado"] = False
-    st.rerun()
-
-# =========================
-# INTERFAZ
-# =========================
-st.markdown(
-    f"""
-    <h1 style="color:{COLOR_PRIMARIO};text-align:center">Sistema de Gestión de Dosimetría</h1>
-    <hr style="border-top: 2px solid {COLOR_SECUNDARIO};">
-    """,
-    unsafe_allow_html=True
+st.set_page_config(
+    page_title="Dosimetría - Microsievert",
+    page_icon="🧪",
+    layout="wide"
 )
-st.write("Sube los archivos necesarios, selecciona el período, pon el nombre del reporte y genera el Excel profesional.")
 
-col1, col2 = st.columns(2)
-with col1:
-    participantes_file = st.file_uploader("Archivo de Participantes (.xlsx, .xls)", type=["xlsx", "xls"], key="participantes")
-with col2:
-    dosis_file = st.file_uploader("Archivo de Dosis (.xlsx, .xls, .csv)", type=["xlsx", "xls", "csv"], key="dosis")
+st.title("🧪 Sistema de Gestión de Dosimetría — Microsievert")
+st.caption("Conexión Ninox + Procesamiento VALOR − CONTROL + Exportación a Excel")
 
 # =========================
-# UTILIDADES
+# Helpers/Constantes
 # =========================
-def _try_read_csv(file):
-    """Intenta leer CSV con ; y, si falla, con ,"""
-    try:
-        return pd.read_csv(file, sep=';', engine='python')
-    except Exception:
-        file.seek(0)
-        return pd.read_csv(file)
+NINOX_TEAM   = "ihp8o8AaLzfodwc4J"
+NINOX_DB     = "ksqzvuts5aq0"
+TARGET_TABLE_NAME = "BASE DE DATOS"  # nombre visible en Ninox
 
-def leer_participantes(f) -> pd.DataFrame:
-    df = pd.read_excel(f)
-    # Normalizar nombres de columnas
-    df.columns = [c.strip().upper() for c in df.columns]
+COLOR_HEADER = "DDDDDD"
 
-    # Campos base
-    base_cols = ["NOMBRE", "APELLIDO", "CÉDULA", "COMPAÑÍA"]
-    for c in base_cols:
-        if c not in df.columns:
-            df[c] = ""
-
-    # DOSIMETROS 1..5
-    for i in range(1, MAX_DOSIMETROS + 1):
-        c = f"DOSIMETRO {i}"
-        if c not in df.columns:
-            df[c] = ""
-        df[c] = (
-            df[c]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-            .replace({"NAN": ""})
-        )
-
-    # PERIODOS 1..5
-    for i in range(1, MAX_PERIODOS + 1):
-        c = f"PERIODO {i}"
-        if c not in df.columns:
-            df[c] = ""
-        df[c] = (
-            df[c]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-            .replace({"NAN": ""})
-        )
-
-    return df
-
-def leer_dosis(f) -> pd.DataFrame:
-    # Lee Excel o CSV
-    if f.name.lower().endswith(".csv"):
-        df = _try_read_csv(f)
-    else:
-        df = pd.read_excel(f)
-
-    # Estandarizar nombres de columnas
-    df.columns = (
-        df.columns
-        .str.strip()
-        .str.lower()
-        .str.replace(' ', '', regex=False)
-        .str.replace('(', '', regex=False)
-        .str.replace(')', '', regex=False)
-    )
-
-    rename_map = {
-        # identificador de dosímetro
-        "dosimeter": "dosimeter",
-        "serial": "dosimeter",
-        "codigo": "dosimeter",
-        "codigodosimetro": "dosimeter",
-        # fecha/timestamp
-        "timestamp": "timestamp",
-        "fecha": "timestamp",
-        "fechalectura": "timestamp",
-        # dosis
-        "hp10dosecorr.": "hp10",
-        "hp10dosecorr": "hp10",
-        "hp10dose": "hp10",
-        "hp0.07dosecorr.": "hp007",
-        "hp0.07dosecorr": "hp007",
-        "hp0.07dose": "hp007",
-        "hp007dosecorr.": "hp007",
-        "hp007dosecorr": "hp007",
-        "hp007dose": "hp007",
-        "hp3dosecorr.": "hp3",
-        "hp3dosecorr": "hp3",
-        "hp3dose": "hp3",
+def ninox_headers():
+    api_key = st.secrets.get("NINOX_API_KEY", "")  # <- añade tu key en .streamlit/secrets.toml
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
     }
-    present_map = {k: v for k, v in rename_map.items() if k in df.columns}
-    df = df.rename(columns=present_map)
 
-    if "dosimeter" not in df.columns:
-        raise ValueError("El archivo de Dosis no contiene la columna del dosímetro (p. ej. 'dosimeter', 'serial', 'codigo').")
+# =========================
+# Conexión Ninox
+# =========================
+@st.cache_data(show_spinner=False, ttl=300)
+def ninox_list_tables(team_id: str, db_id: str):
+    url = f"https://api.ninox.com/v1/teams/{team_id}/databases/{db_id}/tables"
+    r = requests.get(url, headers=ninox_headers(), timeout=30)
+    r.raise_for_status()
+    return r.json()
 
-    # Asegurar columnas de dosis
-    for dose_col in ["hp10", "hp007", "hp3"]:
-        if dose_col not in df.columns:
-            df[dose_col] = 0.0
+@st.cache_data(show_spinner=False, ttl=300)
+def ninox_get_table_id_by_name(team_id: str, db_id: str, target_name: str):
+    tables = ninox_list_tables(team_id, db_id)
+    for t in tables:
+        # Cada 't' típicamente trae keys: id, name
+        if str(t.get("name", "")).strip().lower() == target_name.strip().lower():
+            return t.get("id")
+    return None
 
-    # Normalizar tipos
-    df["dosimeter"] = df["dosimeter"].astype(str).str.strip().str.upper()
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+@st.cache_data(show_spinner=False, ttl=300)
+def ninox_fetch_records(team_id: str, db_id: str, table_id: str, per_page: int = 1000, max_pages: int = 10):
+    """
+    Descarga registros de una tabla Ninox. Maneja paginado simple por offset.
+    Devuelve lista de dicts con campos en 'fields'.
+    """
+    url = f"https://api.ninox.com/v1/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
+    results = []
+    offset = 0
+    page = 0
+    while page < max_pages:
+        params = {"perPage": per_page, "offset": offset}
+        r = requests.get(url, headers=ninox_headers(), params=params, timeout=30)
+        r.raise_for_status()
+        batch = r.json()
+        if not batch:
+            break
+        results.extend(batch)
+        if len(batch) < per_page:
+            break
+        offset += per_page
+        page += 1
+    return results
 
-    # Mantener columnas útiles
-    keep = ["dosimeter", "timestamp", "hp10", "hp007", "hp3"]
-    df = df[[c for c in keep if c in df.columns]]
+# =========================
+# Normalización de dosis
+# =========================
+def leer_dosis(upload):
+    """
+    Lee archivo de dosis (CSV/Excel) y normaliza columnas:
+    - 'dosimeter' (código)
+    - 'hp10dose', 'hp0.07dose', 'hp3dose'
+    """
+    if upload is None:
+        return None
 
-    # Dedupe: conservar lectura más reciente por dosímetro
-    if "timestamp" in df.columns:
-        df = df.sort_values("timestamp").drop_duplicates(subset=["dosimeter"], keep="last")
+    # Leer en DataFrame
+    name = upload.name.lower()
+    if name.endswith(".csv"):
+        # Intentar ; y luego ,
+        try:
+            df = pd.read_csv(upload, delimiter=';', engine='python')
+        except Exception:
+            upload.seek(0)
+            df = pd.read_csv(upload)
     else:
-        df = df.drop_duplicates(subset=["dosimeter"], keep="last")
+        df = pd.read_excel(upload)
+
+    # Normalizar nombres
+    norm = (df.columns.astype(str).str.strip().str.lower()
+           .str.replace(' ', '', regex=False)
+           .str.replace('(', '').str.replace(')', '')
+           .str.replace('.', '', regex=False))
+    df.columns = norm
+
+    # Mapear variantes
+    # Dosimeter
+    if 'dosimeter' not in df.columns:
+        # tratar alternativas típicas
+        for alt in ['dosimetro', 'codigo', 'codigo_dosimetro']:
+            if alt in df.columns:
+                df.rename(columns={alt: 'dosimeter'}, inplace=True)
+                break
+
+    # Hp(10)
+    for cand in ['hp10dosecorr', 'hp10dose', 'hp10']:
+        if cand in df.columns:
+            df.rename(columns={cand: 'hp10dose'}, inplace=True)
+            break
+    # Hp(0.07)
+    for cand in ['hp007dosecorr', 'hp007dose', 'hp007']:
+        if cand in df.columns:
+            df.rename(columns={cand: 'hp0.07dose'}, inplace=True)
+            break
+    # Hp(3)
+    for cand in ['hp3dosecorr', 'hp3dose', 'hp3']:
+        if cand in df.columns:
+            df.rename(columns={cand: 'hp3dose'}, inplace=True)
+            break
+
+    # Asegurar columnas
+    for k in ['hp10dose', 'hp0.07dose', 'hp3dose']:
+        if k in df.columns:
+            df[k] = pd.to_numeric(df[k], errors='coerce').fillna(0.0)
+        else:
+            df[k] = 0.0
+
+    if 'dosimeter' in df.columns:
+        df['dosimeter'] = df['dosimeter'].astype(str).str.strip().str.upper()
+
+    # Si trae timestamp
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
 
     return df
 
-def generar_reporte(df_final: pd.DataFrame, logo_bytes: bytes | None = None) -> BytesIO:
+# =========================
+# Procesamiento VALOR − CONTROL
+# =========================
+def procesar_valor_menos_control(registros):
+    """
+    registros: lista de dicts con keys: Hp(10), Hp(0.07), Hp(3)
+    Primera fila es CONTROL (base)
+    Regla PM: diff < 0.005  (cubre negativos)
+    Redondeo a 2 decimales solo para mostrar
+    """
+    if not registros:
+        return []
+
+    base10 = float(registros[0]['Hp(10)'])
+    base07 = float(registros[0]['Hp(0.07)'])
+    base3  = float(registros[0]['Hp(3)'])
+
+    for i, r in enumerate(registros):
+        if i == 0:
+            r['PERIODO DE LECTURA'] = "CONTROL"
+            r['Hp(10)'] = f"{base10:.2f}"
+            r['Hp(0.07)'] = f"{base07:.2f}"
+            r['Hp(3)'] = f"{base3:.2f}"
+        else:
+            for key, base in [('Hp(10)', base10), ('Hp(0.07)', base07), ('Hp(3)', base3)]:
+                diff = float(r[key]) - base  # VALOR - CONTROL
+                r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
+
+    return registros
+
+# =========================
+# Cruzar Ninox <-> Dosis
+# =========================
+def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
+    """
+    dfp: participantes desde Ninox (DataFrame)
+    dfd: dosis (DataFrame) con 'dosimeter', 'hp10dose', 'hp0.07dose', 'hp3dose'
+    """
+    registros = []
+    for _, fila in dfp.iterrows():
+        nombre_raw = f"{str(fila.get('NOMBRE','')).strip()} {str(fila.get('APELLIDO','')).strip()}".strip()
+
+        for i in range(1, 6):
+            col_d = f'DOSIMETRO {i}'
+            col_p = f'PERIODO {i}'
+            cod = str(fila.get(col_d, '')).strip().upper()
+            raw_periodo = str(fila.get(col_p, '')).upper()
+
+            if not cod or cod == 'NAN':
+                continue
+
+            # Normalizar periodo
+            if re.match(r'^\s*CONTROL\b', raw_periodo):
+                periodo_i = "CONTROL"
+            else:
+                periodo_i = re.sub(r'\.+', '.', raw_periodo).strip()
+
+            # Filtrado por periodo
+            if periodo_filtro not in ("", "— TODOS —") and periodo_i != periodo_filtro:
+                continue
+
+            # Buscar dosis
+            row = dfd.loc[dfd['dosimeter'] == cod]
+            if not row.empty:
+                r0 = row.iloc[0]
+                fecha = r0.get('timestamp', pd.NaT)
+                fecha_str = ""
+                try:
+                    if pd.notna(fecha):
+                        fecha_str = pd.to_datetime(fecha).strftime('%d/%m/%Y %H:%M')
+                except Exception:
+                    fecha_str = ""
+
+                registros.append({
+                    'PERIODO DE LECTURA': periodo_i,
+                    'COMPAÑÍA': fila.get('COMPAÑÍA',''),
+                    'CÓDIGO DE DOSÍMETRO': cod,
+                    'NOMBRE': nombre_raw,
+                    'CÉDULA': fila.get('CÉDULA',''),
+                    'FECHA DE LECTURA': fecha_str,
+                    'TIPO DE DOSÍMETRO': 'CE',
+                    'Hp(10)': float(r0.get('hp10dose', 0.0)),
+                    'Hp(0.07)': float(r0.get('hp0.07dose', 0.0)),
+                    'Hp(3)': float(r0.get('hp3dose', 0.0))
+                })
+    return registros
+
+# =========================
+# Exportar a Excel con formato
+# =========================
+def exportar_excel_formato(df_final: pd.DataFrame, nombre_base: str = None) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "REPORTE DE DOSIS"
 
-    border = Border(
-        left=Side(style='thin'), right=Side(style='thin'),
-        top=Side(style='thin'), bottom=Side(style='thin')
-    )
+    border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                    top=Side(style='thin'), bottom=Side(style='thin'))
 
-    # Encabezado: fecha
+    # Fecha emisión
     ws['I1'] = f"Fecha de emisión: {datetime.now().strftime('%d/%m/%Y')}"
     ws['I1'].font = Font(size=10, italic=True)
     ws['I1'].alignment = Alignment(horizontal='right', vertical='top')
-
-    # Logo (opcional)
-    ws['A1'] = ""
-    ws['A1'].font = Font(size=10)
-    ws['A1'].alignment = Alignment(horizontal='left', vertical='top')
-
-    if logo_bytes:
-        try:
-            logo_img = XLImage(BytesIO(logo_bytes))
-            logo_img.width, logo_img.height = 240, 100
-            ws.add_image(logo_img, "A1")
-        except Exception:
-            pass
 
     # Título
     ws.merge_cells('A5:J5')
@@ -231,19 +264,20 @@ def generar_reporte(df_final: pd.DataFrame, logo_bytes: bytes | None = None) -> 
     c.font = Font(bold=True, size=14)
     c.alignment = Alignment(horizontal='center')
 
-    # Encabezados de tabla principal
+    # Encabezados
     headers = [
-        'PERIODO DE LECTURA', 'COMPAÑÍA', 'CÓDIGO DE DOSÍMETRO', 'NOMBRE',
-        'CÉDULA', 'FECHA DE LECTURA', 'TIPO DE DOSÍMETRO', 'Hp(10)', 'Hp(0.07)', 'Hp(3)'
+        'PERIODO DE LECTURA', 'COMPAÑÍA', 'CÓDIGO DE DOSÍMETRO',
+        'NOMBRE', 'CÉDULA', 'FECHA DE LECTURA',
+        'TIPO DE DOSÍMETRO', 'Hp(10)', 'Hp(0.07)', 'Hp(3)'
     ]
     for i, h in enumerate(headers, 1):
         cell = ws.cell(row=7, column=i, value=h)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal='center')
-        cell.fill = PatternFill('solid', fgColor='DDDDDD')
+        cell.fill = PatternFill('solid', fgColor=COLOR_HEADER)
         cell.border = border
 
-    # Filas
+    # Datos
     start_row = 8
     for idx, row in df_final.iterrows():
         for col_idx, val in enumerate(row, 1):
@@ -252,315 +286,144 @@ def generar_reporte(df_final: pd.DataFrame, logo_bytes: bytes | None = None) -> 
             c.font = Font(size=10)
             c.border = border
 
-    # Auto-ancho de columnas
+    # Ajuste ancho
     for col in ws.columns:
         max_len = max(len(str(c.value)) if c.value else 0 for c in col) + 2
         ws.column_dimensions[get_column_letter(col[0].column)].width = max_len
 
-    # Secciones informativas
-    info_start = start_row + len(df_final) + 2
-    row = info_start
-
-    ws.merge_cells(f'A{row}:P{row}')
-    c = ws[f'A{row}']
-    c.value = 'INFORMACIÓN DEL REPORTE DE DOSIMETRÍA'
-    c.font = Font(bold=True)
-    c.alignment = Alignment(horizontal='center')
-    row += 1
-
-    bullets = [
-        '‒ Periodo de lectura: periodo de uso del dosímetro personal.',
-        '‒ Fecha de lectura: fecha en que se realizó la lectura.',
-        '‒ Tipo de dosímetro:'
-    ]
-    for text in bullets:
-        ws.merge_cells(f'A{row}:D{row}')
-        c = ws[f'A{row}']
-        c.value = text
-        c.font = Font(size=10, bold=True)
-        c.alignment = Alignment(horizontal='left')
-        row += 2
-
-    tipos = [('CE', 'Cuerpo Entero'), ('A', 'Anillo'), ('B', 'Brazalete'), ('CR', 'Cristalino')]
-    for clave, desc in tipos:
-        ws.merge_cells(f'C{row}:D{row}')
-        c = ws[f'C{row}']
-        c.value = f"{clave} = {desc}"
-        c.font = Font(size=10, bold=True)
-        c.alignment = Alignment(horizontal='left')
-        for col in ('C', 'D'):
-            ws.cell(row=row, column=ord(col)-64).border = border
-        row += 1
-
-    row += 1
-    ws.merge_cells(f'F{row}:I{row}')
-    c = ws[f'F{row}']
-    c.value = 'LÍMITES ANUALES DE EXPOSICIÓN A RADIACIONES'
-    c.font = Font(bold=True, size=10)
-    c.alignment = Alignment(horizontal='center')
-    row += 1
-
-    limites = [
-        ("Cuerpo Entero", "20 mSv/año"),
-        ("Cristalino", "150 mSv/año"),
-        ("Extremidades y piel", "500 mSv/año"),
-        ("Fetal", "1 mSv/periodo de gestación"),
-        ("Público", "1 mSv/año")
-    ]
-    for cat, val in limites:
-        ws.merge_cells(f'F{row}:G{row}')
-        ws[f'F{row}'].value = cat
-        ws[f'F{row}'].font = Font(size=10)
-        ws[f'F{row}'].alignment = Alignment(horizontal='left')
-        ws.merge_cells(f'H{row}:I{row}')
-        ws[f'H{row}'].value = val
-        ws[f'H{row}'].font = Font(size=10)
-        ws[f'H{row}'].alignment = Alignment(horizontal='right')
-        for col in ('F','G','H','I'):
-            ws.cell(row=row, column=ord(col)-64).border = border
-        row += 1
-
-    row += 2
-    ws.merge_cells(f'A{row}:P{row}')
-    c = ws[f'A{row}']
-    c.value = '‒ DATOS DEL PARTICIPANTE:'
-    c.font = Font(bold=True, size=10)
-    c.alignment = Alignment(horizontal='left')
-    row += 1
-
-    datos = [
-        '‒ Código de usuario: Número único asignado al usuario por Microsievert, S.A.',
-        '‒ Nombre: Persona a la cual se le asigna el dosímetro personal.',
-        '‒ Cédula: Número del documento de identidad personal del usuario.',
-        '‒ Fecha de nacimiento: Registro de la fecha de nacimiento del usuario.'
-    ]
-    for txt in datos:
-        ws.merge_cells(f'A{row}:P{row}')
-        c = ws[f'A{row}']
-        c.value = txt
-        c.font = Font(size=10)
-        c.alignment = Alignment(horizontal='left', wrap_text=True)
-        row += 1
-
-    row += 2
-    ws.merge_cells(f'A{row}:P{row}')
-    c = ws[f'A{row}']
-    c.value = '‒ DOSIS EN MILISIEVERT:'
-    c.font = Font(bold=True, size=10)
-    c.alignment = Alignment(horizontal='left')
-    row += 1
-
-    # Encabezados de definiciones
-    ws.merge_cells(f'B{row}:C{row}')
-    hb = ws[f'B{row}']; hb.value = 'Nombre'
-    hb.font = Font(bold=True, size=10)
-    hb.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    hb.fill = PatternFill('solid', fgColor='DDDDDD')
-
-    ws.merge_cells(f'D{row}:I{row}')
-    hd = ws[f'D{row}']; hd.value = 'Definición'
-    hd.font = Font(bold=True, size=10)
-    hd.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    hd.fill = PatternFill('solid', fgColor='DDDDDD')
-
-    ws.merge_cells(f'J{row}:J{row}')
-    hu = ws[f'J{row}']; hu.value = 'Unidad'
-    hu.font = Font(bold=True, size=10)
-    hu.alignment = Alignment(horizontal='center', wrap_text=True)
-    hu.fill = PatternFill('solid', fgColor='DDDDDD')
-
-    for col in ('B','C','D','E','F','G','H','I','J'):
-        ws.cell(row=row, column=ord(col)-64).border = border
-    ws.row_dimensions[row].height = 30
-    row += 1
-
-    definitions = [
-        ("Dosis efectiva Hp(10)",  "Es la dosis equivalente en tejido blando, J·kg⁻¹ o Sv a una profundidad de 10 mm, bajo determinado punto del cuerpo.", "mSv"),
-        ("Dosis superficial Hp(0,07)", "Es la dosis equivalente en tejido blando, J·kg⁻¹ o Sv a una profundidad de 0,07 mm, bajo determinado punto del cuerpo.", "mSv"),
-        ("Dosis cristalino Hp(3)", "Es la dosis equivalente en tejido blando, J·kg⁻¹ o Sv a una profundidad de 3 mm, bajo determinado punto del cuerpo.", "mSv")
-    ]
-    for nom, desc, uni in definitions:
-        ws.merge_cells(f'B{row}:C{row}')
-        c = ws[f'B{row}']; c.value = nom; c.font = Font(size=10, bold=True); c.alignment = Alignment(horizontal='left', wrap_text=True)
-        ws.merge_cells(f'D{row}:I{row}')
-        c = ws[f'D{row}']; c.value = desc; c.font = Font(size=10); c.alignment = Alignment(horizontal='left', wrap_text=True)
-        ws.merge_cells(f'J{row}:J{row}')
-        c = ws[f'J{row}']; c.value = uni; c.font = Font(size=10); c.alignment = Alignment(horizontal='center', wrap_text=True)
-        for col in ('B','C','D','E','F','G','H','I','J'):
-            cell = ws.cell(row=row, column=ord(col)-64)
-            cell.border = border
-            cell.alignment = Alignment(wrap_text=True)
-        ws.row_dimensions[row].height = 30
-        row += 1
-
-    row += 1
-    ws.merge_cells(f'A{row}:P{row}')
-    c = ws[f'A{row}']
-    c.value = 'LECTURAS DE ANILLO: las lecturas del dosímetro de anillo son registradas como una dosis equivalente superficial Hp(0,07).'
-    c.font = Font(size=10, bold=True)
-    c.alignment = Alignment(horizontal='left', wrap_text=True)
-    row += 1
-
-    ws.merge_cells(f'A{row}:P{row}')
-    c = ws[f'A{row}']
-    c.value = 'Los resultados de las dosis individuales de radiación son reportados para diferentes periodos de tiempo:'
-    c.font = Font(size=10)
-    c.alignment = Alignment(horizontal='left', wrap_text=True)
-    row += 1
-
-    periods = [
-        ('DOSIS ACTUAL', 'Es el correspondiente de dosis acumulada durante el período de lectura definido.'),
-        ('DOSIS ANUAL', 'Es el correspondiente de dosis acumulada desde el inicio del año hasta la fecha.'),
-        ('DOSIS DE POR VIDA', 'Es el correspondiente de dosis acumulada desde el inicio del servicio dosimétrico hasta la fecha.')
-    ]
-    for clave, texto in periods:
-        ws.merge_cells(f'B{row}:C{row}')
-        c = ws[f'B{row}']; c.value = clave; c.font = Font(bold=True, size=10); c.alignment = Alignment(horizontal='center')
-        ws.merge_cells(f'D{row}:P{row}')
-        c = ws[f'D{row}']; c.value = texto; c.font = Font(size=10); c.alignment = Alignment(horizontal='left', wrap_text=True)
-        for col in ('B','C') + tuple(chr(x) for x in range(68, 81)):
-            ws.cell(row=row, column=ord(col)-64).border = border
-        row += 1
-
-    row += 2
-    ws.merge_cells(f'A{row}:P{row}')
-    c = ws[f'A{row}']
-    c.value = ('DOSÍMETRO DE CONTROL: incluido en cada paquete entregado para monitorear la exposición a la radiación recibida durante el tránsito y almacenamiento. '
-               'Este dosímetro debe ser guardado por el cliente en un área libre de radiación durante el período de uso.')
-    c.font = Font(size=10, bold=True)
-    c.alignment = Alignment(horizontal='left', wrap_text=True)
-    row += 2
-
-    ws.merge_cells(f'A{row}:P{row}')
-    c = ws[f'A{row}']
-    c.value = ('POR DEBAJO DEL MÍNIMO DETECTADO: es la dosis por debajo de la cantidad mínima reportada para el período de uso y son registradas como "PM".')
-    c.font = Font(size=10, bold=True)
-    c.alignment = Alignment(horizontal='left', wrap_text=True)
-
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output
+    # A binario
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.read()
 
 # =========================
-# LECTURA DE ARCHIVOS / PERÍODO
+# UI: Panel izquierdo
 # =========================
-periodo_opciones = []
-dfp = None
+with st.sidebar:
+    st.header("⚙️ Configuración")
+    st.markdown("1. Añade tu **NINOX_API_KEY** a `st.secrets`.\n2. Carga tu archivo de **dosis**.\n3. Pulsa **Procesar**.")
 
-if participantes_file:
-    try:
-        dfp = leer_participantes(participantes_file)
-        periodos = set()
-        for i in range(1, MAX_PERIODOS + 1):
-            colp = f"PERIODO {i}"
-            if colp in dfp.columns:
-                periodos.update(dfp[colp].dropna().astype(str).str.strip().str.upper())
-        periodo_opciones = sorted([p for p in periodos if p and p != ""])
-        if not periodo_opciones:
-            st.info("No se detectaron períodos en Participantes. Puedes continuar, pero el reporte mostrará el campo de período con lo que selecciones manualmente.")
-    except Exception as e:
-        st.error(f"Error leyendo participantes: {e}")
-
-periodo_seleccionado = st.selectbox(
-    "Selecciona el período a mostrar",
-    options=periodo_opciones if periodo_opciones else ["(sin período)"]
-)
-if periodo_seleccionado == "(sin período)":
-    periodo_seleccionado = ""
-
-nombre_reporte = st.text_input(
-    "Nombre del archivo de reporte (sin extensión):",
-    value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}"
-)
-
-logo_file = st.file_uploader("Sube el logo de Microsievert (.png, opcional)", type=["png"], key="logo")
-logo_bytes = logo_file.read() if logo_file else None
+    show_tables = st.checkbox("Mostrar tablas de Ninox (debug)", value=False)
+    periodo_filtro = st.text_input("Filtrar por PERIODO (opcional)", value="— TODOS —")
 
 # =========================
-# GENERACIÓN DE REPORTE
+# Paso 1: Verificar API Key
 # =========================
-btn_disabled = not (participantes_file and dosis_file)
+if not st.secrets.get("NINOX_API_KEY"):
+    st.warning("Agrega tu **NINOX_API_KEY** en `.streamlit/secrets.toml` para conectar con Ninox.")
+    st.code(
+        '[global]\n'
+        'disableWatchdogWarning = true\n\n'
+        '[secrets]\n'
+        'NINOX_API_KEY = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"\n',
+        language="toml"
+    )
 
-if st.button("✅ Generar Reporte", disabled=btn_disabled):
-    try:
-        if not participantes_file or not dosis_file:
-            st.error("Debes subir el archivo de Participantes y el de Dosis.")
-        elif not nombre_reporte.strip():
-            st.error("El nombre del archivo es obligatorio.")
-        elif re.search(r'[\\/:*?"<>|]', nombre_reporte):
-            st.error("El nombre del archivo contiene caracteres no permitidos.")
+# =========================
+# Paso 2: Conectar a Ninox
+# =========================
+table_id = None
+df_participantes = None
+ninox_error = None
+
+try:
+    if st.secrets.get("NINOX_API_KEY"):
+        if show_tables:
+            st.subheader("Tablas disponibles en Ninox")
+            _tables = ninox_list_tables(NINOX_TEAM, NINOX_DB)
+            st.json(_tables)
+
+        table_id = ninox_get_table_id_by_name(NINOX_TEAM, NINOX_DB, TARGET_TABLE_NAME)
+        if not table_id:
+            ninox_error = f"No se encontró la tabla '{TARGET_TABLE_NAME}'. Revisa el nombre."
         else:
-            dfp = leer_participantes(participantes_file)
-            dfd = leer_dosis(dosis_file)
-            dfd_index = dfd.set_index("dosimeter")
+            raw_records = ninox_fetch_records(NINOX_TEAM, NINOX_DB, table_id)
+            # Ninox devuelve cada item con 'fields'
+            rows = []
+            for rec in raw_records:
+                fields = rec.get("fields", {})
+                rows.append(fields)
+            df_participantes = pd.DataFrame(rows) if rows else pd.DataFrame()
+            # Normalizar columnas de interés a mayúsculas uniformes
+            df_participantes.columns = [str(c).upper().strip() for c in df_participantes.columns]
+            # Si falta alguna, aún así seguimos; el procesamiento valida
+except Exception as e:
+    ninox_error = f"Error conectando a Ninox: {e}"
 
-            registros = []
-            for _, fila in dfp.iterrows():
-                # Considerar DOSIMETRO 1..5
-                codigos = [(fila.get(f"DOSIMETRO {i}", "") or "").strip().upper()
-                           for i in range(1, MAX_DOSIMETROS + 1)]
-                for cod in codigos:
-                    if not cod:
-                        continue
-                    if cod in dfd_index.index:
-                        dosis = dfd_index.loc[cod]
-                        nombre_raw = f"{fila.get('NOMBRE','')} {fila.get('APELLIDO','')}".strip()
-                        nombre = "CONTROL" if "CONTROL" in nombre_raw.upper() else nombre_raw
-
-                        fecha = dosis.get('timestamp', None)
-                        fecha_str = pd.to_datetime(fecha, errors='coerce').strftime('%d/%m/%Y %H:%M') if pd.notna(fecha) else ''
-
-                        registros.append({
-                            'PERIODO DE LECTURA': periodo_seleccionado,
-                            'COMPAÑÍA': fila.get('COMPAÑÍA', ''),
-                            'CÓDIGO DE DOSÍMETRO': cod,
-                            'NOMBRE': nombre,
-                            'CÉDULA': fila.get('CÉDULA', ''),
-                            'FECHA DE LECTURA': fecha_str,
-                            'TIPO DE DOSÍMETRO': 'CE',
-                            'Hp(10)': float(dosis.get('hp10', 0.0)),
-                            'Hp(0.07)': float(dosis.get('hp007', 0.0)),
-                            'Hp(3)': float(dosis.get('hp3', 0.0))
-                        })
-
-            if not registros:
-                st.warning("No se encontraron coincidencias entre Participantes y Dosis (verifica que los códigos coincidan).")
-            else:
-                # Tomar el primer registro como CONTROL base
-                base10 = float(registros[0]['Hp(10)'])
-                base07 = float(registros[0]['Hp(0.07)'])
-                base3  = float(registros[0]['Hp(3)'])
-
-                for i, r in enumerate(registros):
-                    if i == 0:
-                        r['Hp(10)']   = f"{base10:.2f}"
-                        r['Hp(0.07)'] = f"{base07:.2f}"
-                        r['Hp(3)']    = f"{base3:.2f}"
-                    else:
-                        for key, base in [('Hp(10)', base10), ('Hp(0.07)', base07), ('Hp(3)', base3)]:
-                            diff = float(r[key]) - base
-                            r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
-
-                df_final = pd.DataFrame(registros)
-                excel_bytes = generar_reporte(df_final, logo_bytes)
-
-                st.success(f"Reporte generado con {len(df_final)} registros.")
-                st.download_button(
-                    label="Descargar Reporte Excel",
-                    data=excel_bytes,
-                    file_name=f"{nombre_reporte.strip()}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-    except Exception as e:
-        st.error(f"Error generando reporte: {e}")
+if ninox_error:
+    st.error(ninox_error)
+else:
+    st.success(f"Conectado a Ninox. Tabla: **{TARGET_TABLE_NAME}** (id: `{table_id}`)")
 
 # =========================
-# FOOTER
+# Paso 3: Subir archivo de Dosis
 # =========================
-st.markdown(
-    f"""<div style="color:{COLOR_FOOTER};text-align:center;font-size:12px;">
-    Sistema de Gestión de Dosimetría - Microsievert
-    </div>""",
-    unsafe_allow_html=True
-)
+st.subheader("📤 Cargar archivo de Dosis (CSV/Excel)")
+upload = st.file_uploader("Selecciona tu archivo de dosis", type=["csv", "xls", "xlsx"])
+df_dosis = leer_dosis(upload) if upload else None
+
+if df_dosis is not None:
+    st.caption("Vista previa de dosis (normalizada):")
+    st.dataframe(df_dosis.head(20), use_container_width=True)
+
+# =========================
+# Paso 4: Procesar
+# =========================
+col_a, col_b = st.columns([1, 1])
+with col_a:
+    nombre_reporte = st.text_input("Nombre del archivo de reporte (sin extensión)", 
+                                   value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}")
+with col_b:
+    run_btn = st.button("✅ Procesar", type="primary", use_container_width=True)
+
+if run_btn:
+    if df_participantes is None or df_participantes.empty:
+        st.error("No hay datos de participantes desde Ninox. Verifica la conexión/tabla.")
+    elif df_dosis is None or df_dosis.empty:
+        st.error("No hay datos de dosis. Sube un archivo CSV/Excel válido.")
+    else:
+        # Validaciones mínimas
+        required_part_cols = ["NOMBRE","APELLIDO","CÉDULA","COMPAÑÍA"] + \
+                             [f"DOSIMETRO {i}" for i in range(1,6)] + \
+                             [f"PERIODO {i}" for i in range(1,6)]
+        faltantes = [c for c in required_part_cols if c not in df_participantes.columns]
+        if faltantes:
+            st.warning(f"Faltan columnas en participantes (Ninox): {faltantes}")
+
+        if 'dosimeter' not in df_dosis.columns:
+            st.error("El archivo de dosis debe incluir una columna de **dosimeter** (código).")
+        else:
+            # Construir registros y aplicar lógica VALOR − CONTROL
+            with st.spinner("Procesando..."):
+                registros = construir_registros(df_participantes, df_dosis, periodo_filtro=periodo_filtro.strip().upper())
+                if not registros:
+                    st.warning("No se encontraron coincidencias DOSÍMETRO ↔ dosis (con este filtro).")
+                else:
+                    registros = procesar_valor_menos_control(registros)
+                    df_final = pd.DataFrame(registros)
+                    # Normalizar "CONTROL..." por si algo quedó
+                    if 'PERIODO DE LECTURA' in df_final.columns:
+                        df_final['PERIODO DE LECTURA'] = (
+                            df_final['PERIODO DE LECTURA']
+                            .astype(str).str.upper()
+                            .str.replace(r'^\s*CONTROL.*$', 'CONTROL', regex=True)
+                            .str.replace(r'\.+$', '', regex=True)
+                            .str.strip()
+                        )
+
+                    st.success(f"¡Listo! Registros generados: {len(df_final)}")
+                    st.dataframe(df_final, use_container_width=True)
+
+                    # Exportar a Excel con formato
+                    try:
+                        xlsx_bytes = exportar_excel_formato(df_final, nombre_base=nombre_reporte.strip())
+                        st.download_button(
+                            label="⬇️ Descargar Excel",
+                            data=xlsx_bytes,
+                            file_name=f"{nombre_reporte.strip() or 'ReporteDosimetria'}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.error(f"No se pudo generar el Excel formateado: {e}")
+
