@@ -1,7 +1,6 @@
-
+# app.py
 import io
 import re
-import math
 import requests
 import pandas as pd
 import streamlit as st
@@ -324,25 +323,44 @@ if btn_proc:
 st.markdown("---")
 st.subheader("⬆️ Subir TODO a Ninox (tabla REPORTE)")
 
-# Mapeo especial de nombres que en Ninox llevan espacio dentro del paréntesis
+# ----- Config extra: mapeo opcional de nombres (ajústalo si tus campos en Ninox se llaman diferente) -----
+CUSTOM_MAP = {
+    # "nombre_en_df_final": "nombre_real_en_Ninox"
+    "PERIODO DE LECTURA": "PERIODO DE LECTURA",
+    "COMPAÑÍA": "COMPAÑÍA",                 # si en Ninox no usas acento, cámbialo a "COMPAÑIA"
+    "CÓDIGO DE DOSÍMETRO": "CÓDIGO DE DOSÍMETRO",
+    "NOMBRE": "NOMBRE",
+    "CÉDULA": "CÉDULA",
+    "FECHA DE LECTURA": "FECHA DE LECTURA",
+    "TIPO DE DOSÍMETRO": "TIPO DE DOSÍMETRO",
+}
+
+# Mapeo especial de Hp con espacio dentro del paréntesis en Ninox
 SPECIAL_MAP = {
     "Hp(10)":   "Hp (10)",
     "Hp(0.07)": "Hp (0.07)",
     "Hp(3)":    "Hp (3)",
 }
 
-def _hp_value(v):
-    """PM -> 'PM' (si está marcado) o None; números -> float."""
+def resolve_dest_name(col_name: str) -> str:
+    """Devuelve el nombre de campo destino en Ninox para una columna del df_final."""
+    if col_name in SPECIAL_MAP:
+        return SPECIAL_MAP[col_name]
+    if col_name in CUSTOM_MAP:
+        return CUSTOM_MAP[col_name]
+    return col_name  # idéntico por defecto
+
+def _hp_value(v, as_text_pm=True):
+    """PM -> 'PM' (si as_text_pm) o None; números -> float o string si no convertible."""
     if isinstance(v, str) and v.strip().upper() == "PM":
-        return "PM" if subir_pm_como_texto else None
+        return "PM" if as_text_pm else None
     try:
         return float(v)
     except Exception:
         return v if v is not None else None
 
 def _to_str(v):
-    if pd.isna(v):
-        return ""
+    if pd.isna(v): return ""
     if isinstance(v, (pd.Timestamp, )):
         return v.strftime("%Y-%m-%d %H:%M:%S")
     return str(v)
@@ -361,6 +379,9 @@ if st.button("Subir TODO a Ninox (tabla REPORTE)"):
             st.error(f"No se pudo leer el esquema de la tabla Ninox: {e}")
             ninox_fields = set()
 
+        with st.expander("Campos detectados en Ninox"):
+            st.write(sorted(ninox_fields))
+
         # 2) Preparar payload enviando TODAS las columnas que existan en Ninox
         rows, skipped_cols = [], set()
         iterator = df_final.head(1).iterrows() if debug_uno else df_final.iterrows()
@@ -368,13 +389,13 @@ if st.button("Subir TODO a Ninox (tabla REPORTE)"):
         for _, row in iterator:
             fields_payload = {}
             for col in df_final.columns:
-                dest = SPECIAL_MAP.get(col, col)  # Hp(...) -> Hp (...)
-                if dest not in ninox_fields:
+                dest = resolve_dest_name(col)  # Hp(...) -> Hp (...), y personalizados
+                if ninox_fields and dest not in ninox_fields:
                     skipped_cols.add(dest)
                     continue
                 val = row[col]
                 if dest in {"Hp (10)", "Hp (0.07)", "Hp (3)"}:
-                    val = _hp_value(val)
+                    val = _hp_value(val, as_text_pm=subir_pm_como_texto)
                 else:
                     val = _to_str(val)
                 fields_payload[dest] = val
@@ -402,6 +423,6 @@ if st.button("Subir TODO a Ninox (tabla REPORTE)"):
         else:
             st.error(f"❌ Error al subir: {res.get('error')}")
             if skipped_cols:
-                st.info("Revisa que los siguientes campos existan en la tabla Ninox:\n- " + "\n- ".join(sorted(skipped_cols)))
+                st.info("Revisa/crea en Ninox los campos omitidos:\n- " + "\n- ".join(sorted(skipped_cols)))  # noqa
 
 
