@@ -11,7 +11,7 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 # ========== NINOX API CONFIG ==========
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # tu API key
+API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # <-- tu API key
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
@@ -356,10 +356,22 @@ with col_upload1:
 with col_upload2:
     debug_uno = st.checkbox("Enviar 1 registro (debug)")
 
+# Nombres EXACTOS en tu Ninox (según captura)
+NINOX_FIELDS = {
+    "PERIODO": "PERIODO DE LECTURA",
+    "COMPANIA": "COMPAÑÍA",
+    "CODIGO": "CÓDIGO DE DOSÍMETRO",
+    "NOMBRE": "NOMBRE",
+    "CEDULA": "CÉDULA",
+    "FECHA": "FECHA DE LECTURA",
+    "TIPO": "TIPO DE DOSÍMETRO",
+    "HP10": "Hp (10)",
+    "HP007": "Hp (0.07)",
+    "HP3": "Hp (3)",
+}
+
 def _hp_to_num_or_none(v):
-    """'PM' -> None; número en texto -> float; otro -> None."""
-    if v is None:
-        return None
+    if v is None: return None
     if isinstance(v, str) and v.strip().upper() == "PM":
         return None
     try:
@@ -368,50 +380,51 @@ def _hp_to_num_or_none(v):
         return None
 
 def _fecha_to_iso(s):
-    """Convierte '13/08/2025 13:22' -> '2025-08-13T13:22:00' cuando se pueda."""
-    if not s:
-        return ""
+    if not s: return ""
     try:
         dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
-        if pd.isna(dt):
-            dt = pd.to_datetime(s, errors="coerce")
-        if pd.isna(dt):
-            return str(s)
+        if pd.isna(dt): dt = pd.to_datetime(s, errors="coerce")
+        if pd.isna(dt): return str(s)
         return dt.strftime("%Y-%m-%dT%H:%M:%S")
     except Exception:
         return str(s)
 
 if st.button("Subir a Ninox (tabla REPORTE)"):
-    df_final = st.session_state.df_final  # recuperar DF persistido
+    df_final = st.session_state.df_final
     if df_final is None or df_final.empty:
         st.error("Primero genera el reporte (Procesar).")
     else:
         rows = []
         iterable = df_final.head(1).iterrows() if debug_uno else df_final.iterrows()
         for _, row in iterable:
-            rows.append({
-                "fields": {
-                    "PERIODO DE LECTURA": str(row.get("PERIODO DE LECTURA", "")),
-                    "COMPAÑÍA": str(row.get("COMPAÑÍA", "")),
-                    "CÓDIGO DE DOSÍMETRO": str(row.get("CÓDIGO DE DOSÍMETRO", "")),
-                    "NOMBRE": str(row.get("NOMBRE", "")),
-                    "CÉDULA": str(row.get("CÉDULA", "")),
-                    "FECHA DE LECTURA": _fecha_to_iso(row.get("FECHA DE LECTURA", "")),
-                    "TIPO DE DOSÍMETRO": str(row.get("TIPO DE DOSÍMETRO", "")),
-                    "Hp(10) ACTUAL": _hp_to_num_or_none(row.get("Hp(10)", "")),
-                    "Hp(0.07) ACTUAL": _hp_to_num_or_none(row.get("Hp(0.07)", "")),
-                    "Hp(3) ACTUAL": _hp_to_num_or_none(row.get("Hp(3)", ""))
-                }
-            })
+            fields = {
+                NINOX_FIELDS["PERIODO"]: str(row.get("PERIODO DE LECTURA", "")),
+                NINOX_FIELDS["COMPANIA"]: str(row.get("COMPAÑÍA", "")),
+                NINOX_FIELDS["CODIGO"]: str(row.get("CÓDIGO DE DOSÍMETRO", "")),
+                NINOX_FIELDS["NOMBRE"]: str(row.get("NOMBRE", "")),
+                NINOX_FIELDS["CEDULA"]: str(row.get("CÉDULA", "")),
+                NINOX_FIELDS["FECHA"]: _fecha_to_iso(row.get("FECHA DE LECTURA", "")),
+                NINOX_FIELDS["TIPO"]: str(row.get("TIPO DE DOSÍMETRO", "")),
+                NINOX_FIELDS["HP10"]:  _hp_to_num_or_none(row.get("Hp(10)", "")),
+                NINOX_FIELDS["HP007"]: _hp_to_num_or_none(row.get("Hp(0.07)", "")),
+                NINOX_FIELDS["HP3"]:   _hp_to_num_or_none(row.get("Hp(3)", "")),
+            }
+            rows.append({"fields": fields})
+
+        if debug_uno:
+            st.caption("Payload que se enviará a Ninox (1 registro):")
+            st.json(rows)
 
         with st.spinner("Subiendo a Ninox..."):
             url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{report_table_id}/records"
             r = requests.post(url, headers=ninox_headers(), json=rows, timeout=60)
 
         if r.status_code == 200:
-            st.success(f"✅ Subido a Ninox: {len(rows)} registro(s) en tabla REPORTE (id {report_table_id}).")
+            st.success(f"✅ Subido a Ninox: {len(rows)} registro(s) → tabla REPORTE (id {report_table_id}).")
         else:
             st.error(f"❌ Error al subir: {r.status_code} {r.text}")
-            st.caption("Activa 'Enviar 1 registro (debug)' para aislar el problema.")
+            st.info("Si persiste, activa 'Enviar 1 registro (debug)' para ver el payload y validar nombres/formatos.")
+
+
 
 
