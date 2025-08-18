@@ -1,7 +1,6 @@
 # app.py
-import os
-import re
 import io
+import re
 import math
 import requests
 import pandas as pd
@@ -12,7 +11,7 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 # ========== NINOX API CONFIG ==========
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # <-- tu API key
+API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # tu API key
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
@@ -24,7 +23,7 @@ st.caption("Ninox + Procesamiento VALOR − CONTROL + Exportación y Carga a Nin
 
 COLOR_HEADER = "DDDDDD"
 
-# --- Session state (para persistir entre clics) ---
+# --- Session state (persistir entre clics) ---
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
 
@@ -60,7 +59,7 @@ def ninox_fetch_records(team_id: str, db_id: str, table_id: str, per_page: int =
     return df
 
 def ninox_insert_records(team_id: str, db_id: str, table_id: str, rows: list, batch_size: int = 400):
-    """Inserta registros en lotes para evitar payloads grandes."""
+    """Inserta registros en lotes."""
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
     headers = ninox_headers()
     n = len(rows)
@@ -185,7 +184,7 @@ def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
 def procesar_valor_menos_control(registros):
     """
     Primera fila = CONTROL (base).
-    Regla PM: diff < 0.005  (incluye negativos).
+    Regla PM: diff < 0.005 (incluye negativos).
     Redondeo a 2 decimales solo para mostrar.
     """
     if not registros:
@@ -331,8 +330,7 @@ if run_btn:
                         .str.replace(r'\.+$', '', regex=True).str.strip()
                     )
 
-                # guardar en sesión para usar en el botón de subir
-                st.session_state.df_final = df_final
+                st.session_state.df_final = df_final  # persistir
 
                 st.success(f"¡Listo! Registros generados: {len(df_final)}")
                 st.dataframe(df_final, use_container_width=True)
@@ -352,46 +350,68 @@ if run_btn:
 st.markdown("---")
 st.subheader("⬆️ Subir el resultado a Ninox (tabla **REPORTE**)")
 
+col_upload1, col_upload2 = st.columns(2)
+with col_upload1:
+    report_table_id = st.text_input("Table ID REPORTE", value=manual_report_table_id or "C")
+with col_upload2:
+    debug_uno = st.checkbox("Enviar 1 registro (debug)")
+
+def _hp_to_num_or_none(v):
+    """'PM' -> None; número en texto -> float; otro -> None."""
+    if v is None:
+        return None
+    if isinstance(v, str) and v.strip().upper() == "PM":
+        return None
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+def _fecha_to_iso(s):
+    """Convierte '13/08/2025 13:22' -> '2025-08-13T13:22:00' cuando se pueda."""
+    if not s:
+        return ""
+    try:
+        dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        if pd.isna(dt):
+            dt = pd.to_datetime(s, errors="coerce")
+        if pd.isna(dt):
+            return str(s)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        return str(s)
+
 if st.button("Subir a Ninox (tabla REPORTE)"):
-    df_final = st.session_state.df_final  # recuperar el DF persistido
+    df_final = st.session_state.df_final  # recuperar DF persistido
     if df_final is None or df_final.empty:
         st.error("Primero genera el reporte (Procesar).")
     else:
-        report_table_id = manual_report_table_id.strip() or "C"
-
-        payload = []
-        for _, row in df_final.iterrows():
-            def hp_val(key):
-                v = row.get(key, "")
-                if isinstance(v, str) and v.upper() == "PM":
-                    return "PM"  # si el campo en Ninox es texto, queda bien
-                try:
-                    return float(v)
-                except Exception:
-                    return str(v)
-
-            payload.append({
+        rows = []
+        iterable = df_final.head(1).iterrows() if debug_uno else df_final.iterrows()
+        for _, row in iterable:
+            rows.append({
                 "fields": {
                     "PERIODO DE LECTURA": str(row.get("PERIODO DE LECTURA", "")),
                     "COMPAÑÍA": str(row.get("COMPAÑÍA", "")),
                     "CÓDIGO DE DOSÍMETRO": str(row.get("CÓDIGO DE DOSÍMETRO", "")),
                     "NOMBRE": str(row.get("NOMBRE", "")),
                     "CÉDULA": str(row.get("CÉDULA", "")),
-                    "FECHA DE LECTURA": str(row.get("FECHA DE LECTURA", "")),
+                    "FECHA DE LECTURA": _fecha_to_iso(row.get("FECHA DE LECTURA", "")),
                     "TIPO DE DOSÍMETRO": str(row.get("TIPO DE DOSÍMETRO", "")),
-                    "Hp(10) ACTUAL": hp_val("Hp(10)"),
-                    "Hp(0.07) ACTUAL": hp_val("Hp(0.07)"),
-                    "Hp(3) ACTUAL": hp_val("Hp(3)")
+                    "Hp(10) ACTUAL": _hp_to_num_or_none(row.get("Hp(10)", "")),
+                    "Hp(0.07) ACTUAL": _hp_to_num_or_none(row.get("Hp(0.07)", "")),
+                    "Hp(3) ACTUAL": _hp_to_num_or_none(row.get("Hp(3)", ""))
                 }
             })
 
         with st.spinner("Subiendo a Ninox..."):
-            res = ninox_insert_records(TEAM_ID, DATABASE_ID, report_table_id, payload, batch_size=400)
+            url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{report_table_id}/records"
+            r = requests.post(url, headers=ninox_headers(), json=rows, timeout=60)
 
-        if res.get("ok"):
-            st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registros en tabla REPORTE (id {report_table_id}).")
+        if r.status_code == 200:
+            st.success(f"✅ Subido a Ninox: {len(rows)} registro(s) en tabla REPORTE (id {report_table_id}).")
         else:
-            st.error(f"❌ Error al subir: {res.get('error')}")
-
+            st.error(f"❌ Error al subir: {r.status_code} {r.text}")
+            st.caption("Activa 'Enviar 1 registro (debug)' para aislar el problema.")
 
 
