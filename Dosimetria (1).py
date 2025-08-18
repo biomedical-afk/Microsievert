@@ -9,7 +9,7 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 # ===================== NINOX CONFIG =====================
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"
+API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # API key proporcionada
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
@@ -25,6 +25,8 @@ st.caption("Ninox + Procesamiento VALOR − CONTROL + Exportación y Carga a Nin
 
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
+if "reporte_final_tab2" not in st.session_state:
+    st.session_state.reporte_final_tab2 = None
 
 # ===================== Ninox helpers =====================
 def ninox_headers():
@@ -233,8 +235,37 @@ def aplicar_valor_menos_control(registros):
                 r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
     return registros
 
-# ===================== Excel =====================
-def exportar_excel(df_final: pd.DataFrame) -> bytes:
+# ===================== Excel utils =====================
+def df_to_excel_bytes(df: pd.DataFrame, sheet_name="REPORTE"):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                    top=Side(style='thin'),  bottom=Side(style='thin'))
+
+    # encabezados
+    for j, h in enumerate(df.columns, 1):
+        cell = ws.cell(row=1, column=j, value=h)
+        cell.font = Font(bold=True); cell.alignment = Alignment(horizontal='center')
+        cell.fill = PatternFill('solid', fgColor='DDDDDD'); cell.border = border
+
+    # datos
+    for i, (_, row) in enumerate(df.iterrows(), start=2):
+        for j, val in enumerate(row, start=1):
+            c = ws.cell(row=i, column=j, value=val)
+            c.alignment = Alignment(horizontal='center', wrap_text=True)
+            c.font = Font(size=10); c.border = border
+
+    # anchos
+    for col in ws.columns:
+        mx = max(len(str(c.value)) if c.value else 0 for c in col) + 2
+        ws.column_dimensions[get_column_letter(col[0].column)].width = mx
+
+    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
+    return bio.read()
+
+def exportar_excel_reporte_valor_control(df_final: pd.DataFrame) -> bytes:
+    # Excel con título, fecha, etc (para Tab 1)
     wb = Workbook()
     ws = wb.active
     ws.title = "REPORTE DE DOSIS"
@@ -351,10 +382,10 @@ with tab1:
                     st.dataframe(df_final, use_container_width=True)
 
                     try:
-                        xlsx = exportar_excel(df_final)
-                        st.download_button("⬇️ Descargar Excel", data=xlsx,
+                        xlsx = exportar_excel_reporte_valor_control(df_final)
+                        st.download_button("⬇️ Descargar Excel (VALOR − CONTROL)", data=xlsx,
                             file_name=f"{(nombre_reporte.strip() or 'ReporteDosimetria')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_val_ctl")
                     except Exception as e:
                         st.error(f"No se pudo generar Excel: {e}")
 
@@ -446,10 +477,10 @@ with tab1:
                     st.info("Revisa/crea en Ninox los campos omitidos:\n- " + "\n- ".join(sorted(skipped_cols)))
 
 # ------------------------------------------------------------------------
-# TAB 2: ACUMULAR DESDE REPORTE (simple: suma por persona y escribe en 9 campos)
+# TAB 2: ACUMULAR DESDE REPORTE (sumar por dosímetro y por persona + descarga)
 # ------------------------------------------------------------------------
 with tab2:
-    st.subheader("📥 Leer REPORTE de Ninox")
+    st.subheader("📥 Leer REPORTE de Ninox (se usa solo para FILTRAR)")
     try:
         df_rep = ninox_fetch_records_with_id(TEAM_ID, DATABASE_ID, report_table_id)
         if df_rep.empty:
@@ -462,14 +493,69 @@ with tab2:
         df_rep = pd.DataFrame()
 
     st.markdown("—")
-    st.subheader("📤 Subir archivo de Dosis para ACUMULAR (filtra por los dosímetros que existen en REPORTE)")
+    st.subheader("📤 Subir archivo de Dosis para ACUMULAR (se usa solo para FILTRAR por dosímetros)")
     up2 = st.file_uploader("Selecciona CSV/XLS/XLSX", type=["csv","xls","xlsx"], key="up2")
     df_dosis2 = leer_dosis(up2) if up2 else None
     if df_dosis2 is not None:
         st.caption("Vista previa dosis (normalizada):")
         st.dataframe(df_dosis2.head(15), use_container_width=True)
 
-    if st.button("🔄 Calcular y ACTUALIZAR acumulados en REPORTE", type="primary", key="act1"):
+    colA, colB = st.columns([1,1])
+    with colA:
+        btn_calc = st.button("🔄 Calcular totales (sin actualizar Ninox)", key="calc2")
+    with colB:
+        btn_act  = st.button("💾 Actualizar acumulados en Ninox", key="act2")
+
+    def _calcular_reporte_final(df_rep_local, df_dosis_local):
+        """Devuelve (por_dosimetro, grp_persona, updates_list)"""
+        rep = df_rep_local.copy()
+        rep['CÓDIGO DE DOSÍMETRO'] = rep.get('CÓDIGO DE DOSÍMETRO', "").astype(str).str.strip().str.upper()
+
+        valid_codes = set(rep['CÓDIGO DE DOSÍMETRO'].dropna().astype(str))
+        dosis_f = df_dosis_local[df_dosis_local['dosimeter'].isin(valid_codes)].copy()
+        if dosis_f.empty:
+            return None, None, []
+
+        mini_rep = rep[['id','CÓDIGO DE DOSÍMETRO','NOMBRE','CÉDULA']].dropna(subset=['id'])
+        merge = dosis_f.merge(mini_rep, left_on='dosimeter', right_on='CÓDIGO DE DOSÍMETRO', how='left')
+
+        # PRIMERO: sumar por NOMBRE + CÉDULA + CÓDIGO DE DOSÍMETRO (si se repite dosímetro, acumula)
+        por_dosimetro = (
+            merge.groupby(['NOMBRE','CÉDULA','CÓDIGO DE DOSÍMETRO'], dropna=False)
+                 .agg(repeticiones=('dosimeter','size'),
+                      hp10sum=('hp10dose','sum'),
+                      hp007sum=('hp0.07dose','sum'),
+                      hp3sum=('hp3dose','sum'))
+                 .reset_index()
+        )
+
+        # DESPUÉS: total por persona (suma de todos sus dosímetros)
+        grp = (
+            por_dosimetro.groupby(['NOMBRE','CÉDULA'], dropna=False)[['hp10sum','hp007sum','hp3sum']]
+                         .sum()
+                         .reset_index()
+        )
+
+        # updates: escribir el mismo total en Hp, Hp ANUAL, Hp DE POR VIDA
+        updates = []
+        sums = {(r['NOMBRE'], r['CÉDULA']):(float(r['hp10sum']), float(r['hp007sum']), float(r['hp3sum']))
+                for _, r in grp.iterrows()}
+
+        for _, r in rep.iterrows():
+            key = (r.get('NOMBRE'), r.get('CÉDULA'))
+            if key in sums and pd.notna(r.get('id')):
+                s10, s07, s3 = sums[key]
+                fields = {
+                    "Hp (10)": s10, "Hp (0.07)": s07, "Hp (3)": s3,
+                    "Hp (10) ANUAL": s10, "Hp (0.07) ANUAL": s07, "Hp (3) ANUAL": s3,
+                    "Hp (10) DE POR VIDA": s10, "Hp (0.07) DE POR VIDA": s07, "Hp (3) DE POR VIDA": s3,
+                }
+                updates.append({"id": r['id'], "fields": fields})
+
+        return por_dosimetro, grp, updates
+
+    # --- Botón: solo calcular y mostrar y permitir descarga (no actualiza Ninox) ---
+    if btn_calc:
         if df_rep.empty:
             st.error("No hay registros en REPORTE.")
         elif df_dosis2 is None or df_dosis2.empty:
@@ -477,74 +563,91 @@ with tab2:
         elif 'dosimeter' not in df_dosis2.columns:
             st.error("El archivo de dosis debe tener la columna 'dosimeter'.")
         else:
-            with st.spinner("Calculando y preparando actualización..."):
-                # 1) normalizar códigos en REPORTE
-                rep = df_rep.copy()
-                if 'CÓDIGO DE DOSÍMETRO' not in rep.columns:
-                    st.error("En REPORTE falta la columna 'CÓDIGO DE DOSÍMETRO'.")
+            with st.spinner("Calculando…"):
+                result = _calcular_reporte_final(df_rep, df_dosis2)
+            if result is None:
+                st.warning("No hubo coincidencias de dosímetro.")
+            else:
+                por_dosimetro, grp, _ = result
+                st.caption("Suma por cada dosímetro (si se repite, se acumula).")
+                st.dataframe(por_dosimetro, use_container_width=True)
+                st.caption("Total por persona (Hp = ANUAL = DE POR VIDA).")
+                st.dataframe(grp, use_container_width=True)
+
+                # Guardar para descargas
+                st.session_state.reporte_final_tab2 = grp
+
+                # Descargas
+                csv_bytes = grp.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("⬇️ Descargar CSV (Total por persona)",
+                                   data=csv_bytes,
+                                   file_name=f"Acumulado_por_persona_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                   mime="text/csv",
+                                   key="dl_csv_tab2")
+
+                xlsx_bytes = df_to_excel_bytes(grp, sheet_name="TOTAL POR PERSONA")
+                st.download_button("⬇️ Descargar Excel (Total por persona)",
+                                   data=xlsx_bytes,
+                                   file_name=f"Acumulado_por_persona_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="dl_xlsx_tab2")
+
+    # --- Botón: calcular y ACTUALIZAR en Ninox ---
+    if btn_act:
+        if df_rep.empty:
+            st.error("No hay registros en REPORTE.")
+        elif df_dosis2 is None or df_dosis2.empty:
+            st.error("No hay datos de dosis para acumular.")
+        elif 'dosimeter' not in df_dosis2.columns:
+            st.error("El archivo de dosis debe tener la columna 'dosimeter'.")
+        else:
+            with st.spinner("Calculando y preparando actualización…"):
+                por_dosimetro, grp, updates = _calcular_reporte_final(df_rep, df_dosis2)
+            if por_dosimetro is None:
+                st.warning("No hubo coincidencias de dosímetro.")
+            else:
+                st.caption("Suma por cada dosímetro (si se repite, se acumula).")
+                st.dataframe(por_dosimetro, use_container_width=True)
+                st.caption("Total por persona a escribir en Ninox (Hp = ANUAL = DE POR VIDA).")
+                st.dataframe(grp, use_container_width=True)
+
+                # Guardar para descargas
+                st.session_state.reporte_final_tab2 = grp
+
+                if not updates:
+                    st.warning("No hubo coincidencias (por NOMBRE/CÉDULA) para actualizar.")
                 else:
-                    rep['CÓDIGO DE DOSÍMETRO'] = rep['CÓDIGO DE DOSÍMETRO'].astype(str).str.strip().str.upper()
-
-                    # 2) quedarnos con dosímetros presentes en REPORTE
-                    valid_codes = set(rep['CÓDIGO DE DOSÍMETRO'].dropna().astype(str))
-                    dosis_f = df_dosis2[df_dosis2['dosimeter'].isin(valid_codes)].copy()
-
-                    if dosis_f.empty:
-                        st.warning("Ningún dosímetro del archivo coincide con los de la tabla REPORTE.")
+                    st.caption("Ejemplo de payload de actualización:")
+                    st.json(updates[:2])
+                    res = ninox_update_records(TEAM_ID, DATABASE_ID, report_table_id, updates, batch_size=300)
+                    if res.get("ok"):
+                        st.success(f"✅ Actualizados {res.get('updated', 0)} registro(s) en REPORTE.")
+                        try:
+                            df_check = ninox_fetch_records(TEAM_ID, DATABASE_ID, report_table_id)
+                            st.caption("Vista rápida de REPORTE (post-actualización):")
+                            st.dataframe(df_check.tail(20), use_container_width=True)
+                        except Exception:
+                            pass
                     else:
-                        # 3) unir por dosímetro para traer NOMBRE/CÉDULA/ID
-                        mini_rep = rep[['id','CÓDIGO DE DOSÍMETRO','NOMBRE','CÉDULA']].dropna(subset=['id'])
-                        merge = dosis_f.merge(mini_rep, left_on='dosimeter', right_on='CÓDIGO DE DOSÍMETRO', how='left')
+                        st.error(f"❌ Error al actualizar: {res.get('error')}")
 
-                        # 4) agrupar por persona (NOMBRE + CÉDULA) y sumar hp*
-                        grp = merge.groupby(['NOMBRE','CÉDULA'], dropna=False).agg(
-                            hp10sum=('hp10dose','sum'),
-                            hp007sum=('hp0.07dose','sum'),
-                            hp3sum=('hp3dose','sum')
-                        ).reset_index()
+    # Si ya hay reporte final calculado, ofrecer descargas persistentes
+    if st.session_state.reporte_final_tab2 is not None and not st.session_state.reporte_final_tab2.empty:
+        st.markdown("---")
+        st.subheader("⬇️ Descargas del reporte final (Total por persona)")
+        grp = st.session_state.reporte_final_tab2
+        csv_bytes = grp.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("⬇️ Descargar CSV (Total por persona)",
+                           data=csv_bytes,
+                           file_name=f"Acumulado_por_persona_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                           mime="text/csv",
+                           key="dl_csv_tab2_persist")
+        xlsx_bytes = df_to_excel_bytes(grp, sheet_name="TOTAL POR PERSONA")
+        st.download_button("⬇️ Descargar Excel (Total por persona)",
+                           data=xlsx_bytes,
+                           file_name=f"Acumulado_por_persona_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_xlsx_tab2_persist")
 
-                        st.caption("Suma por persona a escribir (Hp = ANUAL = DE POR VIDA):")
-                        st.dataframe(grp, use_container_width=True)
-
-                        # 5) preparar updates por cada registro de esa persona
-                        #    (si hay varias filas mismas persona en REPORTE, se actualizan todas con la misma suma)
-                        updates = []
-                        hp_fields_all = [
-                            "Hp (10)","Hp (0.07)","Hp (3)",
-                            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-                            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-                        ]
-
-                        # dict: (nombre, cedula) -> (sum10, sum007, sum3)
-                        sums = {(r['NOMBRE'], r['CÉDULA']):(float(r['hp10sum']), float(r['hp007sum']), float(r['hp3sum'])) for _, r in grp.iterrows()}
-
-                        for _, r in rep.iterrows():
-                            key = (r.get('NOMBRE'), r.get('CÉDULA'))
-                            if key in sums and pd.notna(r.get('id')):
-                                s10, s07, s3 = sums[key]
-                                fields = {
-                                    "Hp (10)": s10, "Hp (0.07)": s07, "Hp (3)": s3,
-                                    "Hp (10) ANUAL": s10, "Hp (0.07) ANUAL": s07, "Hp (3) ANUAL": s3,
-                                    "Hp (10) DE POR VIDA": s10, "Hp (0.07) DE POR VIDA": s07, "Hp (3) DE POR VIDA": s3,
-                                }
-                                updates.append({"id": r['id'], "fields": fields})
-
-                        if not updates:
-                            st.warning("No hubo coincidencias (por NOMBRE/CÉDULA) para actualizar.")
-                        else:
-                            st.caption("Ejemplo de update:")
-                            st.json(updates[:2])
-
-                            res = ninox_update_records(TEAM_ID, DATABASE_ID, report_table_id, updates, batch_size=300)
-                            if res.get("ok"):
-                                st.success(f"✅ Actualizados {res.get('updated', 0)} registro(s) en REPORTE.")
-                                try:
-                                    df_check = ninox_fetch_records(TEAM_ID, DATABASE_ID, report_table_id)
-                                    st.caption("Vista rápida de REPORTE (post-actualización):")
-                                    st.dataframe(df_check.tail(20), use_container_width=True)
-                                except Exception:
-                                    pass
-                            else:
-                                st.error(f"❌ Error al actualizar: {res.get('error')}")
 
 
