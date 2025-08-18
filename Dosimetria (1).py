@@ -3,6 +3,7 @@ import os
 import re
 import io
 import json
+import math
 import requests
 import pandas as pd
 import streamlit as st
@@ -12,7 +13,7 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 # ========== NINOX API CONFIG ==========
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"
+API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # <-- tu API key
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
@@ -20,7 +21,7 @@ BASE_URL    = "https://api.ninox.com/v1"
 # ========== STREAMLIT CONFIG ==========
 st.set_page_config(page_title="Microsievert - Dosimetría", page_icon="🧪", layout="wide")
 st.title("🧪 Sistema de Gestión de Dosimetría — Microsievert")
-st.caption("Ninox + Procesamiento VALOR − CONTROL + Exportación a Excel")
+st.caption("Ninox + Procesamiento VALOR − CONTROL + Exportación/Carga a Ninox")
 
 COLOR_HEADER = "DDDDDD"
 
@@ -57,12 +58,30 @@ def ninox_fetch_records(team_id: str, db_id: str, table_id: str, per_page: int =
             break
         offset += per_page
         page += 1
-    # Ninox: cada item trae 'fields' con las columnas
     rows = [rec.get("fields", {}) for rec in results]
     df = pd.DataFrame(rows) if rows else pd.DataFrame()
-    # Normalizar a mayúsculas
     df.columns = [str(c).upper().strip() for c in df.columns]
     return df
+
+def ninox_insert_records(team_id: str, db_id: str, table_id: str, rows: list, batch_size: int = 400):
+    """
+    rows: lista de dicts ya con clave 'fields'
+    Hace POST en lotes para evitar payloads grandes.
+    """
+    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
+    headers = ninox_headers()
+    n = len(rows)
+    if n == 0:
+        return {"ok": True, "inserted": 0}
+    total_batches = math.ceil(n / batch_size)
+    inserted = 0
+    for b in range(total_batches):
+        chunk = rows[b*batch_size:(b+1)*batch_size]
+        r = requests.post(url, headers=headers, json=chunk, timeout=60)
+        if r.status_code != 200:
+            return {"ok": False, "inserted": inserted, "error": f"{r.status_code} {r.text}"}
+        inserted += len(chunk)
+    return {"ok": True, "inserted": inserted}
 
 # ------------------------ Lectura/normalización dosis ------------------------
 def leer_dosis(upload):
@@ -93,21 +112,15 @@ def leer_dosis(upload):
                 break
 
     # Mapear dosis
-    # Hp(10)
     for cand in ['hp10dosecorr', 'hp10dose', 'hp10']:
         if cand in df.columns:
-            df.rename(columns={cand: 'hp10dose'}, inplace=True)
-            break
-    # Hp(0.07)
+            df.rename(columns={cand: 'hp10dose'}, inplace=True); break
     for cand in ['hp007dosecorr', 'hp007dose', 'hp007']:
         if cand in df.columns:
-            df.rename(columns={cand: 'hp0.07dose'}, inplace=True)
-            break
-    # Hp(3)
+            df.rename(columns={cand: 'hp0.07dose'}, inplace=True); break
     for cand in ['hp3dosecorr', 'hp3dose', 'hp3']:
         if cand in df.columns:
-            df.rename(columns={cand: 'hp3dose'}, inplace=True)
-            break
+            df.rename(columns={cand: 'hp3dose'}, inplace=True); break
 
     # Asegurar numéricos
     for k in ['hp10dose', 'hp0.07dose', 'hp3dose']:
@@ -133,7 +146,6 @@ def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
     dfd: dosis normalizada con 'dosimeter', 'hp10dose', 'hp0.07dose', 'hp3dose'
     """
     registros = []
-    # Normalizar campos esperados en dfp (si no existen, crear vacíos para evitar KeyError)
     expected = ["NOMBRE","APELLIDO","CÉDULA","COMPAÑÍA"] + \
                [f"DOSIMETRO {i}" for i in range(1,6)] + \
                [f"PERIODO {i}" for i in range(1,6)]
@@ -190,7 +202,7 @@ def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
 def procesar_valor_menos_control(registros):
     """
     Primera fila = CONTROL (base).
-    Regla PM: diff < 0.005  (cubre negativos).
+    Regla PM: diff < 0.005 (cubre negativos).
     Redondeo a 2 decimales solo para mostrar.
     """
     if not registros:
@@ -265,41 +277,32 @@ def exportar_excel_formato(df_final: pd.DataFrame) -> bytes:
 # ------------------------ UI Sidebar ------------------------
 with st.sidebar:
     st.header("⚙️ Configuración")
-    st.markdown("1) Verifica tu conexión Ninox.\n2) Sube el archivo de **dosis**.\n3) Procesa.")
-    manual_table_id = st.text_input("Table ID (opcional)", value="E")  # por tu URL module/E
-    target_table_name = st.text_input("Nombre de Tabla (si no usas ID)", value="BASE DE DATOS")
+    st.markdown("1) Conecta a Ninox.\n2) Sube **dosis**.\n3) Procesa.\n4) (Opcional) Sube a **REPORTE**.")
+    manual_base_table_id   = st.text_input("Table ID BASE DE DATOS", value="E")     # module/E
+    manual_report_table_id = st.text_input("Table ID REPORTE", value="C")          # module/C
     periodo_filtro = st.text_input("Filtro PERIODO (opcional)", value="— TODOS —")
     show_tables = st.checkbox("Mostrar tablas Ninox (debug)", value=False)
 
-# ------------------------ Conexión Ninox ------------------------
-table_id = None
+# ------------------------ Conexión Ninox (BASE DE DATOS) ------------------------
 df_participantes = None
 ninox_error = None
 
 try:
-    # Resolver table_id: prioridad al manual, luego por nombre
-    if manual_table_id.strip():
-        table_id = manual_table_id.strip()
-    else:
-        table_id = ninox_get_table_id_by_name(TEAM_ID, DATABASE_ID, target_table_name)
-
+    base_table_id = manual_base_table_id.strip() or "E"
     if show_tables:
         st.subheader("Debug Ninox - Tablas")
         st.json(ninox_list_tables(TEAM_ID, DATABASE_ID))
 
-    if not table_id:
-        ninox_error = "No se pudo resolver la tabla (ni ID ni nombre)."
-    else:
-        df_participantes = ninox_fetch_records(TEAM_ID, DATABASE_ID, table_id)
-        if df_participantes is None or df_participantes.empty:
-            ninox_error = "No hay datos de participantes desde Ninox (la tabla está vacía o sin permisos)."
+    df_participantes = ninox_fetch_records(TEAM_ID, DATABASE_ID, base_table_id)
+    if df_participantes is None or df_participantes.empty:
+        ninox_error = "No hay datos de participantes desde Ninox (tabla BASE DE DATOS)."
 except Exception as e:
     ninox_error = f"Error conectando a Ninox: {e}"
 
 if ninox_error:
     st.error(ninox_error)
 else:
-    st.success(f"Conectado a Ninox. Tabla id: **{table_id}**")
+    st.success(f"Conectado a Ninox. Tabla BASE DE DATOS id: **{base_table_id}**")
     st.caption("Vista previa de participantes (Ninox):")
     st.dataframe(df_participantes.head(20), use_container_width=True)
 
@@ -316,9 +319,10 @@ colA, colB = st.columns([1,1])
 with colA:
     nombre_reporte = st.text_input("Nombre del archivo (sin extensión)",
                                    value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}")
-
 with colB:
     run_btn = st.button("✅ Procesar", type="primary", use_container_width=True)
+
+df_final = None
 
 if run_btn:
     if ninox_error:
@@ -337,7 +341,8 @@ if run_btn:
             else:
                 registros = procesar_valor_menos_control(registros)
                 df_final = pd.DataFrame(registros)
-                # Normalizar "CONTROL..." por si algo quedó
+
+                # Normalizar "CONTROL..." → "CONTROL"
                 if 'PERIODO DE LECTURA' in df_final.columns:
                     df_final['PERIODO DE LECTURA'] = (
                         df_final['PERIODO DE LECTURA']
@@ -360,5 +365,55 @@ if run_btn:
                     )
                 except Exception as e:
                     st.error(f"No se pudo generar el Excel formateado: {e}")
+
+# ------------------------ Subir a Ninox (REPORTE) ------------------------
+st.markdown("---")
+st.subheader("⬆️ Subir el resultado a Ninox (tabla **REPORTE**)")
+
+if st.button("Subir a Ninox (tabla REPORTE)"):
+    if df_final is None or df_final.empty:
+        st.error("Primero genera el reporte (Procesar).")
+    else:
+        # Construir payload para Ninox tabla REPORTE (id por defecto module/C)
+        report_table_id = manual_report_table_id.strip() or "C"
+
+        payload = []
+        for _, row in df_final.iterrows():
+            # Los campos Hp pueden ser 'PM' (string) o número en texto "0.08"
+            def hp_val(key):
+                v = row.get(key, "")
+                try:
+                    # Si es como "0.08" -> número; si "PM" -> dejar string
+                    if isinstance(v, str) and v.upper() == "PM":
+                        return "PM"
+                    # si es string "0.08", pásalo a float para columnas numéricas
+                    return float(v)
+                except Exception:
+                    return str(v)
+
+            registro = {
+                "fields": {
+                    "PERIODO DE LECTURA": str(row.get("PERIODO DE LECTURA", "")),
+                    "COMPAÑÍA": str(row.get("COMPAÑÍA", "")),
+                    "CÓDIGO DE DOSÍMETRO": str(row.get("CÓDIGO DE DOSÍMETRO", "")),
+                    "NOMBRE": str(row.get("NOMBRE", "")),
+                    "CÉDULA": str(row.get("CÉDULA", "")),
+                    "FECHA DE LECTURA": str(row.get("FECHA DE LECTURA", "")),
+                    "TIPO DE DOSÍMETRO": str(row.get("TIPO DE DOSÍMETRO", "")),
+                    "Hp(10) ACTUAL": hp_val("Hp(10)"),
+                    "Hp(0.07) ACTUAL": hp_val("Hp(0.07)"),
+                    "Hp(3) ACTUAL": hp_val("Hp(3)")
+                }
+            }
+            payload.append(registro)
+
+        with st.spinner("Subiendo a Ninox..."):
+            res = ninox_insert_records(TEAM_ID, DATABASE_ID, report_table_id, payload, batch_size=400)
+
+        if res.get("ok"):
+            st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registros en tabla REPORTE (id {report_table_id}).")
+        else:
+            st.error(f"❌ Error al subir: {res.get('error')}")
+
 
 
