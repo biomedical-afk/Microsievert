@@ -1,4 +1,4 @@
-
+# app.py
 import io
 import re
 import requests
@@ -10,7 +10,7 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 # ===================== NINOX CONFIG =====================
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # <-- tu API key
+API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
@@ -40,7 +40,6 @@ def ninox_list_tables(team_id: str, db_id: str):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def ninox_fetch_records(team_id: str, db_id: str, table_id: str, per_page: int = 1000):
-    """Devuelve DF con SOLO fields (sin id)."""
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
     out, offset = [], 0
     while True:
@@ -58,7 +57,6 @@ def ninox_fetch_records(team_id: str, db_id: str, table_id: str, per_page: int =
 
 @st.cache_data(ttl=300, show_spinner=False)
 def ninox_fetch_records_with_ids(team_id: str, db_id: str, table_id: str, per_page: int = 1000):
-    """Devuelve DF con _id + fields (para poder actualizar)."""
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
     out, offset = [], 0
     while True:
@@ -92,9 +90,6 @@ def ninox_insert_records(team_id: str, db_id: str, table_id: str, rows: list, ba
     return {"ok": True, "inserted": inserted}
 
 def ninox_update_records(team_id: str, db_id: str, table_id: str, rows: list, batch_size: int = 300):
-    """
-    rows: [{"id": "<recordId>", "fields": {...}}, ...]
-    """
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
     if not rows:
         return {"ok": True, "updated": 0}
@@ -184,7 +179,6 @@ def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
             if not cod or cod == "NAN": continue
 
             periodo_i = "CONTROL" if re.match(r'^\s*CONTROL\b', per) else re.sub(r'\.+', '.', per).strip()
-
             pf = (periodo_filtro or "").strip().upper()
             if pf not in ("", "— TODOS —") and periodo_i != pf:
                 continue
@@ -241,12 +235,16 @@ def exportar_excel(df_final: pd.DataFrame) -> bytes:
     ws['I1'].font = Font(size=10, italic=True)
     ws['I1'].alignment = Alignment(horizontal='right', vertical='top')
 
-    ws.merge_cells('A5:J5')
+    ws.merge_cells('A5:P5')
     c = ws['A5']; c.value = 'REPORTE DE DOSIMETRÍA'
     c.font = Font(bold=True, size=14); c.alignment = Alignment(horizontal='center')
 
-    headers = ['PERIODO DE LECTURA','COMPAÑÍA','CÓDIGO DE DOSÍMETRO','NOMBRE',
-               'CÉDULA','FECHA DE LECTURA','TIPO DE DOSÍMETRO','Hp(10)','Hp(0.07)','Hp(3)']
+    headers = [
+        'PERIODO DE LECTURA','COMPAÑÍA','CÓDIGO DE DOSÍMETRO','NOMBRE','CÉDULA','FECHA DE LECTURA',
+        'TIPO DE DOSÍMETRO','Hp (10)','Hp (0.07)','Hp (3)',
+        'Hp (10) ANUAL','Hp (0.07) ANUAL','Hp (3) ANUAL',
+        'Hp (10) DE POR VIDA','Hp (0.07) DE POR VIDA','Hp (3) DE POR VIDA'
+    ]
     for i, h in enumerate(headers, 1):
         cell = ws.cell(row=7, column=i, value=h)
         cell.font = Font(bold=True); cell.alignment = Alignment(horizontal='center')
@@ -280,7 +278,7 @@ with st.sidebar:
 tab1, tab2 = st.tabs(["Procesar y subir reporte", "Actualizar acumulados (Ninox)"])
 
 # -------------------------------------------------------------------
-# TAB 1: Procesar y subir a Ninox (como ya venías haciendo)
+# TAB 1: Procesar y subir a Ninox (incluye acumulados y orden final)
 # -------------------------------------------------------------------
 with tab1:
     st.subheader("Procesar archivo de dosis y subir a REPORTE")
@@ -329,7 +327,7 @@ with tab1:
                     registros = aplicar_valor_menos_control(registros)
                     df_final = pd.DataFrame(registros)
 
-                    # limpiar CONTROL... → CONTROL
+                    # Normalizar CONTROL (quitar puntos)
                     df_final['PERIODO DE LECTURA'] = (
                         df_final['PERIODO DE LECTURA'].astype(str).str.upper()
                         .str.replace(r'^\s*CONTROL.*$', 'CONTROL', regex=True)
@@ -342,6 +340,105 @@ with tab1:
                         .str.replace(r'\.+$', '', regex=True).str.strip()
                     )
 
+                    # --------- AÑADIR ACUMULADOS Y ORDEN FINAL ---------
+                    def _hp_to_num(x):
+                        if isinstance(x, str) and x.strip().upper() == "PM": return 0.0
+                        try: return float(x)
+                        except Exception: return 0.0
+
+                    def _parse_fecha_dmy(s):
+                        try: return pd.to_datetime(s, dayfirst=True, errors='coerce')
+                        except Exception: return pd.NaT
+
+                    df_final['__fecha_dt'] = df_final['FECHA DE LECTURA'].apply(_parse_fecha_dmy)
+                    df_final['__year'] = df_final['__fecha_dt'].dt.year
+
+                    # Númericos auxiliares
+                    df_final['__hp10'] = df_final['Hp(10)'].apply(_hp_to_num)
+                    df_final['__hp07'] = df_final['Hp(0.07)'].apply(_hp_to_num)
+                    df_final['__hp3']  = df_final['Hp(3)'].apply(_hp_to_num)
+
+                    # Fuente para acumulados: tabla REPORTE (si ya cargaste) o el propio lote
+                    df_src = st.session_state.get("df_reporte_ninox")
+                    if df_src is not None and not df_src.empty:
+                        # detectar nombres en Ninox
+                        nombre_col  = next((c for c in df_src.columns if c.strip().upper() == "NOMBRE"), "NOMBRE")
+                        cedula_col  = next((c for c in df_src.columns if c.strip().upper() in {"CÉDULA","CEDULA"}), "CÉDULA")
+                        fecha_col   = next((c for c in df_src.columns if c.strip().upper() == "FECHA DE LECTURA"), "FECHA DE LECTURA")
+                        hp10_col    = next((c for c in df_src.columns if c.strip().lower() in {"hp (10)","hp(10)","hp 10"}), "Hp (10)")
+                        hp07_col    = next((c for c in df_src.columns if c.strip().lower() in {"hp (0.07)","hp(0.07)","hp 0.07"}), "Hp (0.07)")
+                        hp3_col     = next((c for c in df_src.columns if c.strip().lower() in {"hp (3)","hp(3)","hp 3"}), "Hp (3)")
+
+                        tmp = df_src.copy()
+                        tmp["_hp10"] = tmp[hp10_col].apply(_hp_to_num)
+                        tmp["_hp07"] = tmp[hp07_col].apply(_hp_to_num)
+                        tmp["_hp3"]  = tmp[hp3_col].apply(_hp_to_num)
+                        tmp["_fecha"] = pd.to_datetime(tmp[fecha_col], dayfirst=True, errors='coerce')
+                        tmp["_year"]  = tmp["_fecha"].dt.year
+
+                        key = [nombre_col, cedula_col]
+                        # DE POR VIDA
+                        life10 = tmp.groupby(key)["_hp10"].sum()
+                        life07 = tmp.groupby(key)["_hp07"].sum()
+                        life3  = tmp.groupby(key)["_hp3"].sum()
+                        # ANUAL (año de cada fila del lote)
+                        # para el lote, usamos el año de la fila df_final['__year'] y buscamos en tmp ese mismo año
+                        # Preparamos dict {(nombre, cedula, year): suma}
+                        year10 = tmp.groupby(key + ["_year"])["_hp10"].sum()
+                        year07 = tmp.groupby(key + ["_year"])["_hp07"].sum()
+                        year3  = tmp.groupby(key + ["_year"])["_hp3"].sum()
+
+                        def acc_row(n, c, y, serie_life, serie_year):
+                            vlife = float(serie_life.get((n, c), 0.0))
+                            vyear = float(serie_year.get((n, c, y), 0.0))
+                            return vyear, vlife
+
+                        anual10, anual07, anual3, vida10, vida07, vida3 = [], [], [], [], [], []
+                        for _, r in df_final.iterrows():
+                            n = r['NOMBRE']; c = r['CÉDULA']; y = int(r['__year']) if pd.notna(r['__year']) else None
+                            vyear10, vlife10 = acc_row(n, c, y, life10, year10)
+                            vyear07, vlife07 = acc_row(n, c, y, life07, year07)
+                            vyear3,  vlife3  = acc_row(n, c, y, life3,  year3)
+                            anual10.append(round(vyear10, 2)); anual07.append(round(vyear07, 2)); anual3.append(round(vyear3, 2))
+                            vida10.append(round(vlife10, 2));   vida07.append(round(vlife07, 2));   vida3.append(round(vlife3, 2))
+                    else:
+                        # Acumulados solo con el lote
+                        key = ['NOMBRE','CÉDULA']
+                        life10 = df_final.groupby(key)['__hp10'].sum()
+                        life07 = df_final.groupby(key)['__hp07'].sum()
+                        life3  = df_final.groupby(key)['__hp3'].sum()
+                        year10 = df_final.groupby(key + ['__year'])['__hp10'].sum()
+                        year07 = df_final.groupby(key + ['__year'])['__hp07'].sum()
+                        year3  = df_final.groupby(key + ['__year'])['__hp3'].sum()
+
+                        anual10, anual07, anual3, vida10, vida07, vida3 = [], [], [], [], [], []
+                        for _, r in df_final.iterrows():
+                            n = r['NOMBRE']; c = r['CÉDULA']; y = r['__year']
+                            vyear10 = float(year10.get((n, c, y), 0.0)); vlife10 = float(life10.get((n, c), 0.0))
+                            vyear07 = float(year07.get((n, c, y), 0.0)); vlife07 = float(life07.get((n, c), 0.0))
+                            vyear3  = float(year3.get((n, c, y), 0.0));  vlife3  = float(life3.get((n, c), 0.0))
+                            anual10.append(round(vyear10, 2)); anual07.append(round(vyear07, 2)); anual3.append(round(vyear3, 2))
+                            vida10.append(round(vlife10, 2));   vida07.append(round(vlife07, 2));   vida3.append(round(vlife3, 2))
+
+                    df_final['Hp (10) ANUAL'] = anual10
+                    df_final['Hp (0.07) ANUAL'] = anual07
+                    df_final['Hp (3) ANUAL'] = anual3
+                    df_final['Hp (10) DE POR VIDA'] = vida10
+                    df_final['Hp (0.07) DE POR VIDA'] = vida07
+                    df_final['Hp (3) DE POR VIDA'] = vida3
+
+                    # Orden FINAL exacto
+                    final_cols = [
+                        'PERIODO DE LECTURA','COMPAÑÍA','CÓDIGO DE DOSÍMETRO','NOMBRE','CÉDULA','FECHA DE LECTURA',
+                        'TIPO DE DOSÍMETRO','Hp (10)','Hp (0.07)','Hp (3)',
+                        'Hp (10) ANUAL','Hp (0.07) ANUAL','Hp (3) ANUAL',
+                        'Hp (10) DE POR VIDA','Hp (0.07) DE POR VIDA','Hp (3) DE POR VIDA'
+                    ]
+                    # renombrar Hp para coincidir con "Hp (..)" en salida
+                    df_final.rename(columns={"Hp(10)":"Hp (10)", "Hp(0.07)":"Hp (0.07)", "Hp(3)":"Hp (3)"}, inplace=True)
+                    df_final = df_final[final_cols].copy()
+
+                    # guardar / mostrar
                     st.session_state.df_final = df_final
                     st.success(f"¡Listo! Registros generados: {len(df_final)}")
                     st.dataframe(df_final, use_container_width=True)
@@ -355,25 +452,19 @@ with tab1:
                         st.error(f"No se pudo generar Excel: {e}")
 
     st.markdown("### Subir TODO a Ninox (tabla REPORTE)")
-    # Detección flexible de campos
-    SPECIAL_MAP = {"Hp(10)": "Hp (10)", "Hp(0.07)": "Hp (0.07)", "Hp(3)": "Hp (3)"}
+    SPECIAL_MAP = {
+        "Hp (10)": "Hp (10)", "Hp (0.07)": "Hp (0.07)", "Hp (3)": "Hp (3)",
+        "Hp (10) ANUAL":"Hp (10) ANUAL", "Hp (0.07) ANUAL":"Hp (0.07) ANUAL", "Hp (3) ANUAL":"Hp (3) ANUAL",
+        "Hp (10) DE POR VIDA":"Hp (10) DE POR VIDA", "Hp (0.07) DE POR VIDA":"Hp (0.07) DE POR VIDA", "Hp (3) DE POR VIDA":"Hp (3) DE POR VIDA"
+    }
     CUSTOM_MAP = {
-        "PERIODO DE LECTURA": "PERIODO DE LECTURA",
-        "COMPAÑÍA": "COMPAÑÍA",   # si en Ninox es sin acento, cambia a "COMPAÑIA"
-        "CÓDIGO DE DOSÍMETRO": "CÓDIGO DE DOSÍMETRO",
-        "NOMBRE": "NOMBRE",
-        "CÉDULA": "CÉDULA",
-        "FECHA DE LECTURA": "FECHA DE LECTURA",
-        "TIPO DE DOSÍMETRO": "TIPO DE DOSÍMETRO",
+        "PERIODO DE LECTURA":"PERIODO DE LECTURA", "COMPAÑÍA":"COMPAÑÍA",
+        "CÓDIGO DE DOSÍMETRO":"CÓDIGO DE DOSÍMETRO", "NOMBRE":"NOMBRE",
+        "CÉDULA":"CÉDULA", "FECHA DE LECTURA":"FECHA DE LECTURA", "TIPO DE DOSÍMETRO":"TIPO DE DOSÍMETRO"
     }
     def resolve_dest_name(col_name: str, ninox_fields: set) -> str:
-        if col_name in SPECIAL_MAP:
-            cand = SPECIAL_MAP[col_name]
-            return cand if cand in ninox_fields else cand  # intenta 'Hp (10)'
-        if col_name in CUSTOM_MAP:
-            cand = CUSTOM_MAP[col_name]
-            return cand if cand in ninox_fields else cand
-        return col_name
+        cand = SPECIAL_MAP.get(col_name) or CUSTOM_MAP.get(col_name) or col_name
+        return cand
 
     def _hp_value(v, as_text_pm=True):
         if isinstance(v, str) and v.strip().upper() == "PM":
@@ -409,7 +500,7 @@ with tab1:
                     if ninox_fields and dest not in ninox_fields:
                         skipped_cols.add(col); continue
                     val = row[col]
-                    if dest in {"Hp (10)", "Hp (0.07)", "Hp (3)"}:
+                    if dest.startswith("Hp ("):
                         val = _hp_value(val, as_text_pm=subir_pm_como_texto)
                     else:
                         val = _to_str(val)
@@ -436,10 +527,10 @@ with tab1:
                 st.error(f"❌ Error al subir: {res.get('error')}")
 
 # -------------------------------------------------------------------
-# TAB 2: Actualizar acumulados Hp(10) ANUAL y DE POR VIDA en Ninox
+# TAB 2: Actualizar acumulados Hp(10/0.07/3) ANUAL y DE POR VIDA en Ninox
 # -------------------------------------------------------------------
 with tab2:
-    st.subheader("Calcular y escribir Hp (10) ANUAL y DE POR VIDA en REPORTE")
+    st.subheader("Calcular y escribir acumulados en REPORTE (modo seguro)")
 
     colY, colZ = st.columns(2)
     with colY:
@@ -472,10 +563,29 @@ with tab2:
         except Exception as e:
             st.error(f"Error leyendo REPORTE: {e}")
 
-    def _to_num_hp(x):
+    # Campos destino configurables
+    st.markdown("#### Campos destino en Ninox (deben ser EDITABLES, no fórmulas)")
+    colA, colB, colC = st.columns(3)
+    with colA:
+        anual10_col = st.text_input("Hp (10) ANUAL", value="Hp (10) ANUAL")
+    with colB:
+        anual07_col = st.text_input("Hp (0.07) ANUAL", value="Hp (0.07) ANUAL")
+    with colC:
+        anual3_col  = st.text_input("Hp (3) ANUAL", value="Hp (3) ANUAL")
+    colA2, colB2, colC2 = st.columns(3)
+    with colA2:
+        vida10_col = st.text_input("Hp (10) DE POR VIDA", value="Hp (10) DE POR VIDA")
+    with colB2:
+        vida07_col = st.text_input("Hp (0.07) DE POR VIDA", value="Hp (0.07) DE POR VIDA")
+    with colC2:
+        vida3_col  = st.text_input("Hp (3) DE POR VIDA", value="Hp (3) DE POR VIDA")
+
+    def _safe_num(x):
         if isinstance(x, str) and x.strip().upper() == "PM": return 0.0
-        try: return float(x)
-        except Exception: return 0.0
+        try:
+            v = float(x);  return 0.0 if pd.isna(v) else v
+        except Exception:
+            return 0.0
 
     def _parse_fecha(s):
         if pd.isna(s): return pd.NaT
@@ -485,74 +595,90 @@ with tab2:
         try: return pd.to_datetime(s, errors="coerce")
         except Exception: return pd.NaT
 
-    if st.button("🧮 Calcular y actualizar acumulados"):
+    def ninox_update_one_by_one(team_id, db_id, table_id, updates):
+        url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
+        for i, up in enumerate(updates, 1):
+            r = requests.post(url, headers=ninox_headers(), json=[up], timeout=60)
+            if r.status_code != 200:
+                return {"ok": False, "updated": i-1, "error": f"{r.status_code} {r.text}", "failed_payload": up}
+        return {"ok": True, "updated": len(updates)}
+
+    if st.button("🧮 Calcular y actualizar acumulados (modo seguro)"):
         df_rep = st.session_state.get("df_reporte_ninox")
         if df_rep is None or df_rep.empty:
             st.error("Primero trae los datos de REPORTE desde Ninox.")
         else:
             df = df_rep.copy()
 
-            # Detectar columnas (flexible)
-            hp10_col = next((c for c in df.columns if c.strip().lower() in {"hp (10)", "hp(10)", "hp 10"}), None)
+            hp10_col = next((c for c in df.columns if c.strip().lower() in {"hp (10)","hp(10)","hp 10"}), None)
+            hp07_col = next((c for c in df.columns if c.strip().lower() in {"hp (0.07)","hp(0.07)","hp 0.07"}), None)
+            hp3_col  = next((c for c in df.columns if c.strip().lower() in {"hp (3)","hp(3)","hp 3"}), None)
             nombre_col  = next((c for c in df.columns if c.strip().upper() == "NOMBRE"), None)
             cedula_col  = next((c for c in df.columns if c.strip().upper() in {"CÉDULA","CEDULA"}), None)
             fecha_col   = next((c for c in df.columns if c.strip().upper() == "FECHA DE LECTURA"), None)
-            codigo_col  = next((c for c in df.columns if "CÓDIGO" in c.upper() and ("DOSÍMETRO" in c.upper() or "DOSIMETRO" in c.upper())), None)
 
-            anual_col_dest    = next((c for c in df.columns if c.strip().upper() in {"HP (10) ANUAL","HP(10) ANUAL","HP  (10) ANUAL"}), "Hp (10) ANUAL")
-            total_col_dest    = next((c for c in df.columns if c.strip().upper() in {"HP (10) DE POR VIDA","HP(10) DE POR VIDA"}), "Hp (10) DE POR VIDA")
-
-            if not all([hp10_col, nombre_col, cedula_col, fecha_col]):
-                st.error("Faltan columnas clave: Hp (10), NOMBRE, CÉDULA y/o FECHA DE LECTURA.")
+            if not all([hp10_col, hp07_col, hp3_col, nombre_col, cedula_col, fecha_col]):
+                st.error("Faltan columnas clave en REPORTE.")
                 st.stop()
 
-            # Filtrar por lote si se pidió
-            if solo_lote and codigos_lote and codigo_col:
-                df = df[df[codigo_col].astype(str).str.upper().isin(codigos_lote)].copy()
-                st.info(f"Aplicado filtro de lote: {len(df)} filas consideradas.")
+            if solo_lote:
+                codigo_col  = next((c for c in df.columns if "CÓDIGO" in c.upper() and ("DOSÍMETRO" in c.upper() or "DOSIMETRO" in c.upper())), None)
+                if codigo_col and len(codigos_lote) > 0:
+                    df = df[df[codigo_col].astype(str).str.upper().isin(codigos_lote)].copy()
+                    st.info(f"Aplicado filtro de lote: {len(df)} filas consideradas.")
 
-            # Preparar numéricos y año
-            df["_hp10_num"] = df[hp10_col].apply(_to_num_hp)
-            df["_fecha_dt"] = df[fecha_col].apply(_parse_fecha)
-            df["_year"]     = df["_fecha_dt"].dt.year
+            df["_hp10"] = df[hp10_col].apply(_safe_num)
+            df["_hp07"] = df[hp07_col].apply(_safe_num)
+            df["_hp3"]  = df[hp3_col].apply(_safe_num)
+            df["_fecha"] = df[fecha_col].apply(_parse_fecha)
+            df["_year"]  = df["_fecha"].dt.year
 
-            # Agrupar por persona
-            person_key = [nombre_col, cedula_col]
-            suma_total = df.groupby(person_key)["_hp10_num"].sum().rename("sum_total")
-            suma_year  = df[df["_year"] == int(target_year)].groupby(person_key)["_hp10_num"].sum().rename("sum_year")
-            acc = pd.concat([suma_total, suma_year], axis=1).fillna(0.0).reset_index()
+            key = [nombre_col, cedula_col]
+            life10 = df.groupby(key)["_hp10"].sum()
+            life07 = df.groupby(key)["_hp07"].sum()
+            life3  = df.groupby(key)["_hp3"].sum()
+            year10 = df[df["_year"] == int(target_year)].groupby(key)["_hp10"].sum()
+            year07 = df[df["_year"] == int(target_year)].groupby(key)["_hp07"].sum()
+            year3  = df[df["_year"] == int(target_year)].groupby(key)["_hp3"].sum()
 
-            st.caption("Acumulados por persona:")
-            st.dataframe(acc, use_container_width=True)
+            acc = pd.concat([
+                life10.rename("life10"), life07.rename("life07"), life3.rename("life3"),
+                year10.rename("year10"), year07.rename("year07"), year3.rename("year3")
+            ], axis=1).fillna(0.0).reset_index()
+            st.caption("Acumulados por persona:"); st.dataframe(acc, use_container_width=True)
 
-            # Construir updates: actualizar TODAS las filas de cada persona con los acumulados
-            # Para eso necesitamos el DF con ids sin filtrar (toda la tabla), para marcar donde aplicar.
+            ninox_fields = ninox_get_table_fields(TEAM_ID, DATABASE_ID, report_table_id)
+            missing = [x for x in [anual10_col, anual07_col, anual3_col, vida10_col, vida07_col, vida3_col] if x not in ninox_fields]
+            if missing:
+                st.error("Estos campos no existen en REPORTE (o no coinciden exactamente):\n- " + "\n- ".join(missing))
+                st.info("Crea campos tipo **Número** o cambia los nombres arriba para que coincidan.")
+                st.stop()
+
             full_df_ids = st.session_state.df_reporte_ninox.copy()
+            if "_id" not in full_df_ids.columns:
+                st.error("No tengo los IDs de Ninox. Vuelve a pulsar 'Traer REPORTE desde Ninox'.")
+                st.stop()
 
             updates = []
-            for _, row in acc.iterrows():
-                n, c = row[nombre_col], row[cedula_col]
-                tot = float(row["sum_total"])
-                yr  = float(row["sum_year"])
-
+            for _, r in acc.iterrows():
+                n, c = r[nombre_col], r[cedula_col]
+                yr10, yr07, yr3 = float(r["year10"]), float(r["year07"]), float(r["year3"])
+                lf10, lf07, lf3  = float(r["life10"]), float(r["life07"]), float(r["life3"])
                 mask = (full_df_ids[nombre_col] == n) & (full_df_ids[cedula_col] == c)
-                for rec_id in full_df_ids.loc[mask, "_id"].dropna().tolist():
-                    updates.append({
-                        "id": rec_id,
-                        "fields": {
-                            anual_col_dest: yr,
-                            total_col_dest: tot
-                        }
-                    })
+                ids = full_df_ids.loc[mask, "_id"].dropna().tolist()
+                for rid in ids:
+                    updates.append({"id": rid, "fields": {
+                        anual10_col: yr10, anual07_col: yr07, anual3_col: yr3,
+                        vida10_col: lf10, vida07_col: lf07, vida3_col: lf3
+                    }})
 
             if not updates:
-                st.warning("No hay filas para actualizar (¿filtro demasiado restrictivo?).")
+                st.warning("No hay filas para actualizar.")
             else:
-                with st.spinner(f"Actualizando {len(updates)} filas en Ninox..."):
-                    res = ninox_update_records(TEAM_ID, DATABASE_ID, report_table_id, updates, batch_size=300)
+                with st.spinner(f"Actualizando {len(updates)} filas (modo seguro)..."):
+                    res = ninox_update_one_by_one(TEAM_ID, DATABASE_ID, report_table_id, updates)
                 if res.get("ok"):
-                    st.success(f"✅ Actualizadas {res.get('updated', 0)} filas en REPORTE.")
-                    # refrescar vista rápida
+                    st.success(f"✅ Actualizadas {res.get('updated', 0)} filas.")
                     try:
                         df_ref = ninox_fetch_records(TEAM_ID, DATABASE_ID, report_table_id)
                         st.caption("Vista rápida de REPORTE (refrescado):")
@@ -561,3 +687,5 @@ with tab2:
                         pass
                 else:
                     st.error(f"❌ Error al actualizar: {res.get('error')}")
+                    st.caption("Payload que falló:"); st.json(res.get("failed_payload"))
+
