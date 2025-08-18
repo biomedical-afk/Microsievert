@@ -1,3 +1,4 @@
+
 import io
 import re
 import math
@@ -13,7 +14,7 @@ from openpyxl.utils import get_column_letter
 API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # <-- tu API key
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
-BASE_URL    = "https://api.ninox.com/v1"              # (si tu equipo es EU, también funciona)
+BASE_URL    = "https://api.ninox.com/v1"
 
 # IDs por defecto (puedes cambiarlos en la sidebar)
 DEFAULT_BASE_TABLE_ID   = "E"   # BASE DE DATOS
@@ -22,6 +23,7 @@ DEFAULT_REPORT_TABLE_ID = "C"   # REPORTE
 # ===================== STREAMLIT =====================
 st.set_page_config(page_title="Microsievert - Dosimetría", page_icon="🧪", layout="wide")
 st.title("🧪 Sistema de Gestión de Dosimetría — Microsievert")
+st.caption("Ninox + Procesamiento VALOR − CONTROL + Exportación y Carga a Ninox")
 
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
@@ -51,7 +53,7 @@ def ninox_fetch_records(team_id: str, db_id: str, table_id: str, per_page: int =
         offset += per_page
     rows = [x.get("fields", {}) for x in out]
     df = pd.DataFrame(rows) if rows else pd.DataFrame()
-    df.columns = [str(c) for c in df.columns]  # conservar acentos
+    df.columns = [str(c) for c in df.columns]  # conservar acentos/espacios
     return df
 
 def ninox_insert_records(team_id: str, db_id: str, table_id: str, rows: list, batch_size: int = 400):
@@ -67,6 +69,24 @@ def ninox_insert_records(team_id: str, db_id: str, table_id: str, rows: list, ba
             return {"ok": False, "inserted": inserted, "error": f"{r.status_code} {r.text}"}
         inserted += len(chunk)
     return {"ok": True, "inserted": inserted}
+
+@st.cache_data(ttl=120, show_spinner=False)
+def ninox_get_table_fields(team_id: str, db_id: str, table_id: str):
+    """Devuelve el conjunto de nombres de campos existentes en la tabla Ninox."""
+    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
+    r = requests.get(url, headers=ninox_headers(), timeout=30)
+    r.raise_for_status()
+    info = r.json()
+    fields = set()
+    for t in info:
+        if str(t.get("id")) == str(table_id):
+            cols = t.get("fields") or t.get("columns") or []
+            for c in cols:
+                name = c.get("name") if isinstance(c, dict) else None
+                if name:
+                    fields.add(name)
+            break
+    return fields
 
 # ===================== Dosis =====================
 def leer_dosis(upload):
@@ -225,11 +245,14 @@ with st.sidebar:
     base_table_id   = st.text_input("Table ID BASE DE DATOS", value=DEFAULT_BASE_TABLE_ID)
     report_table_id = st.text_input("Table ID REPORTE", value=DEFAULT_REPORT_TABLE_ID)
     periodo_filtro  = st.text_input("Filtro PERIODO (opcional)", value="— TODOS —")
-    subir_pm_como_texto = st.checkbox("Subir 'PM' como TEXTO (los campos Hp en Ninox deben ser Texto)", value=True)
+    subir_pm_como_texto = st.checkbox("Subir 'PM' como TEXTO (si campos Hp son Texto en Ninox)", value=True)
     debug_uno = st.checkbox("Enviar 1 registro (debug)", value=False)
+    show_tables = st.checkbox("Mostrar tablas Ninox (debug)", value=False)
 
 # ===================== Conexión Ninox BASE =====================
 try:
+    if show_tables:
+        st.expander("Tablas Ninox (debug)").json(ninox_list_tables(TEAM_ID, DATABASE_ID))
     df_participantes = ninox_fetch_records(TEAM_ID, DATABASE_ID, base_table_id)
     if df_participantes.empty:
         st.warning("No hay datos en BASE DE DATOS (Ninox).")
@@ -297,73 +320,88 @@ if btn_proc:
                 except Exception as e:
                     st.error(f"No se pudo generar Excel: {e}")
 
-# ===================== Subir a Ninox REPORTE =====================
+# ===================== Subir TODO a Ninox REPORTE =====================
 st.markdown("---")
-st.subheader("⬆️ Subir a Ninox (tabla REPORTE)")
+st.subheader("⬆️ Subir TODO a Ninox (tabla REPORTE)")
 
-# Mapeo EXACTO de nombres destino en Ninox
-NINOX_FIELDS = {
-    "PERIODO": "PERIODO DE LECTURA",
-    "COMPANIA": "COMPAÑÍA",
-    "CODIGO": "CÓDIGO DE DOSÍMETRO",
-    "NOMBRE": "NOMBRE",
-    "CEDULA": "CÉDULA",
-    "FECHA": "FECHA DE LECTURA",
-    "TIPO": "TIPO DE DOSÍMETRO",
-    "HP10": "Hp (10)",
-    "HP007": "Hp (0.07)",
-    "HP3": "Hp (3)",
+# Mapeo especial de nombres que en Ninox llevan espacio dentro del paréntesis
+SPECIAL_MAP = {
+    "Hp(10)":   "Hp (10)",
+    "Hp(0.07)": "Hp (0.07)",
+    "Hp(3)":    "Hp (3)",
 }
 
 def _hp_value(v):
-    """Regla de subida para Hp: si 'PM' → texto 'PM' (opción marcada) o None (vacío)."""
+    """PM -> 'PM' (si está marcado) o None; números -> float."""
     if isinstance(v, str) and v.strip().upper() == "PM":
         return "PM" if subir_pm_como_texto else None
     try:
         return float(v)
     except Exception:
-        return v
+        return v if v is not None else None
 
-if st.button("Subir a Ninox (tabla REPORTE)"):
+def _to_str(v):
+    if pd.isna(v):
+        return ""
+    if isinstance(v, (pd.Timestamp, )):
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+    return str(v)
+
+if st.button("Subir TODO a Ninox (tabla REPORTE)"):
     df_final = st.session_state.df_final
     if df_final is None or df_final.empty:
         st.error("Primero pulsa 'Procesar'.")
     else:
-        rows = []
-        it = df_final.head(1).iterrows() if debug_uno else df_final.iterrows()
-        for _, r in it:
-            fields = {
-                NINOX_FIELDS["PERIODO"]: str(r.get("PERIODO DE LECTURA","")),
-                NINOX_FIELDS["COMPANIA"]: str(r.get("COMPAÑÍA","")),
-                NINOX_FIELDS["CODIGO"]: str(r.get("CÓDIGO DE DOSÍMETRO","")),
-                NINOX_FIELDS["NOMBRE"]: str(r.get("NOMBRE","")),
-                NINOX_FIELDS["CEDULA"]: str(r.get("CÉDULA","")),
-                NINOX_FIELDS["FECHA"]: str(r.get("FECHA DE LECTURA","")),
-                NINOX_FIELDS["TIPO"]: str(r.get("TIPO DE DOSÍMETRO","")),
-                NINOX_FIELDS["HP10"]:  _hp_value(r.get("Hp(10)","")),
-                NINOX_FIELDS["HP007"]: _hp_value(r.get("Hp(0.07)","")),
-                NINOX_FIELDS["HP3"]:   _hp_value(r.get("Hp(3)","")),
-            }
-            rows.append({"fields": fields})
+        # 1) Campos disponibles en Ninox
+        try:
+            ninox_fields = ninox_get_table_fields(TEAM_ID, DATABASE_ID, report_table_id)
+            if not ninox_fields:
+                st.warning("No pude leer los campos de la tabla en Ninox. Verifica el ID de tabla.")
+        except Exception as e:
+            st.error(f"No se pudo leer el esquema de la tabla Ninox: {e}")
+            ninox_fields = set()
+
+        # 2) Preparar payload enviando TODAS las columnas que existan en Ninox
+        rows, skipped_cols = [], set()
+        iterator = df_final.head(1).iterrows() if debug_uno else df_final.iterrows()
+
+        for _, row in iterator:
+            fields_payload = {}
+            for col in df_final.columns:
+                dest = SPECIAL_MAP.get(col, col)  # Hp(...) -> Hp (...)
+                if dest not in ninox_fields:
+                    skipped_cols.add(dest)
+                    continue
+                val = row[col]
+                if dest in {"Hp (10)", "Hp (0.07)", "Hp (3)"}:
+                    val = _hp_value(val)
+                else:
+                    val = _to_str(val)
+                fields_payload[dest] = val
+            rows.append({"fields": fields_payload})
 
         if debug_uno:
-            st.caption("Payload a Ninox (1 registro):")
-            st.json(rows)
+            st.caption("Payload (primer registro):")
+            st.json(rows[:1])
 
-        with st.spinner("Subiendo..."):
-            res = ninox_insert_records(TEAM_ID, DATABASE_ID, report_table_id, rows, batch_size=400)
+        # 3) Subir en lotes
+        with st.spinner("Subiendo a Ninox..."):
+            res = ninox_insert_records(TEAM_ID, DATABASE_ID, report_table_id, rows, batch_size=300)
 
         if res.get("ok"):
-            st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s) en tabla {report_table_id}.")
-            # Traer muestra para verificar que se vea:
+            st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
+            if skipped_cols:
+                st.info("Columnas omitidas por no existir en Ninox:\n- " + "\n- ".join(sorted(skipped_cols)))
+            # Vista rápida de lo que quedó en la tabla
             try:
                 df_check = ninox_fetch_records(TEAM_ID, DATABASE_ID, report_table_id)
-                st.caption("Vista rápida de lo que hay en la tabla REPORTE:")
+                st.caption("Contenido reciente en REPORTE:")
                 st.dataframe(df_check.tail(len(rows)), use_container_width=True)
             except Exception:
                 pass
         else:
             st.error(f"❌ Error al subir: {res.get('error')}")
-            st.info("Revisa que los nombres de los campos en Ninox coincidan EXACTO y el tipo 'Hp' permita texto si marcas PM como texto.")
+            if skipped_cols:
+                st.info("Revisa que los siguientes campos existan en la tabla Ninox:\n- " + "\n- ".join(sorted(skipped_cols)))
 
 
