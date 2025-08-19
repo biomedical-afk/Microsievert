@@ -134,6 +134,32 @@ def leer_dosis(upload):
 
     return df
 
+# ===================== Utilidades de período =====================
+def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
+    """
+    Si el periodo es 'CONTROL' (o vacío), devuelve 'MES YYYY' usando FECHA DE LECTURA.
+    Si ya viene un texto distinto a CONTROL, lo limpia y lo devuelve.
+    """
+    per = (periodo_str or "").strip().upper()
+    per = re.sub(r'\.+$', '', per).strip()
+
+    if per and per != "CONTROL":
+        return per
+
+    if not fecha_str:
+        return per or ""
+
+    try:
+        fecha = pd.to_datetime(fecha_str, dayfirst=True, errors="coerce")
+        if pd.isna(fecha):
+            return per or ""
+        meses = ["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO",
+                 "JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"]
+        mes = meses[fecha.month - 1]
+        return f"{mes} {fecha.year}"
+    except Exception:
+        return per or ""
+
 # ===================== Cruce y cálculo =====================
 def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
     registros = []
@@ -150,7 +176,6 @@ def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
             per = str(fila.get(f'PERIODO {i}', '')).upper()
             if not cod or cod == "NAN": continue
 
-            # periodo CONTROL limpio
             periodo_i = "CONTROL" if re.match(r'^\s*CONTROL\b', per) else re.sub(r'\.+', '.', per).strip()
 
             pf = (periodo_filtro or "").strip().upper()
@@ -184,20 +209,31 @@ def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
 
 def aplicar_valor_menos_control(registros):
     if not registros: return registros
+
+    # Bases del primer registro (CONTROL)
     base10 = float(registros[0]['Hp(10)'])
     base07 = float(registros[0]['Hp(0.07)'])
     base3  = float(registros[0]['Hp(3)'])
+
     for i, r in enumerate(registros):
+        # Normalizar el PERIODO usando FECHA (evita 'CONTROL')
+        r['PERIODO DE LECTURA'] = periodo_desde_fecha(
+            r.get('PERIODO DE LECTURA', ''),
+            r.get('FECHA DE LECTURA', '')
+        )
+
         if i == 0:
-            r['PERIODO DE LECTURA'] = "CONTROL"
-            r['NOMBRE'] = "CONTROL"
+            # El primer registro solo marca NOMBRE como CONTROL; no tocar el periodo
+            r['NOMBRE']  = "CONTROL"
             r['Hp(10)']  = f"{base10:.2f}"
             r['Hp(0.07)'] = f"{base07:.2f}"
             r['Hp(3)']   = f"{base3:.2f}"
         else:
+            # VALOR - CONTROL y PM si diff < 0.005 (luego formateo 0.00)
             for key, base in [('Hp(10)', base10), ('Hp(0.07)', base07), ('Hp(3)', base3)]:
-                diff = float(r[key]) - base  # VALOR - CONTROL
+                diff = float(r[key]) - base
                 r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
+
     return registros
 
 # ===================== Excel =====================
@@ -207,6 +243,7 @@ def exportar_excel(df_final: pd.DataFrame) -> bytes:
     ws.title = "REPORTE DE DOSIS"
     border = Border(left=Side(style='thin'), right=Side(style='thin'),
                     top=Side(style='thin'),  bottom=Side(style='thin'))
+
     ws['I1'] = f"Fecha de emisión: {datetime.now().strftime('%d/%m/%Y')}"
     ws['I1'].font = Font(size=10, italic=True)
     ws['I1'].alignment = Alignment(horizontal='right', vertical='top')
@@ -294,16 +331,15 @@ if btn_proc:
                 registros = aplicar_valor_menos_control(registros)
                 df_final = pd.DataFrame(registros)
 
-                # limpiar CONTROL... → CONTROL
+                # Limpieza suave del PERIODO (sin forzar 'CONTROL')
                 df_final['PERIODO DE LECTURA'] = (
-                    df_final['PERIODO DE LECTURA'].astype(str).str.upper()
-                    .str.replace(r'^\s*CONTROL.*$', 'CONTROL', regex=True)
+                    df_final['PERIODO DE LECTURA'].astype(str)
                     .str.replace(r'\.+$', '', regex=True).str.strip()
                 )
+                # Aseguramos que el primer registro diga NOMBRE=CONTROL
                 df_final.loc[df_final.index.min(), 'NOMBRE'] = 'CONTROL'
                 df_final['NOMBRE'] = (
                     df_final['NOMBRE'].astype(str)
-                    .str.replace(r'^\s*CONTROL.*$', 'CONTROL', regex=True)
                     .str.replace(r'\.+$', '', regex=True).str.strip()
                 )
 
@@ -323,35 +359,23 @@ if btn_proc:
 st.markdown("---")
 st.subheader("⬆️ Subir TODO a Ninox (tabla REPORTE)")
 
-# ----- Config extra: mapeo opcional de nombres (ajústalo si tus campos en Ninox se llaman diferente) -----
 CUSTOM_MAP = {
-    # "nombre_en_df_final": "nombre_real_en_Ninox"
     "PERIODO DE LECTURA": "PERIODO DE LECTURA",
-    "COMPAÑÍA": "COMPAÑÍA",                 # si en Ninox no usas acento, cámbialo a "COMPAÑIA"
+    "COMPAÑÍA": "COMPAÑÍA",
     "CÓDIGO DE DOSÍMETRO": "CÓDIGO DE DOSÍMETRO",
     "NOMBRE": "NOMBRE",
     "CÉDULA": "CÉDULA",
     "FECHA DE LECTURA": "FECHA DE LECTURA",
     "TIPO DE DOSÍMETRO": "TIPO DE DOSÍMETRO",
 }
-
-# Mapeo especial de Hp con espacio dentro del paréntesis en Ninox
-SPECIAL_MAP = {
-    "Hp(10)":   "Hp (10)",
-    "Hp(0.07)": "Hp (0.07)",
-    "Hp(3)":    "Hp (3)",
-}
+SPECIAL_MAP = {"Hp(10)": "Hp (10)", "Hp(0.07)": "Hp (0.07)", "Hp(3)": "Hp (3)"}
 
 def resolve_dest_name(col_name: str) -> str:
-    """Devuelve el nombre de campo destino en Ninox para una columna del df_final."""
-    if col_name in SPECIAL_MAP:
-        return SPECIAL_MAP[col_name]
-    if col_name in CUSTOM_MAP:
-        return CUSTOM_MAP[col_name]
-    return col_name  # idéntico por defecto
+    if col_name in SPECIAL_MAP: return SPECIAL_MAP[col_name]
+    if col_name in CUSTOM_MAP:  return CUSTOM_MAP[col_name]
+    return col_name
 
 def _hp_value(v, as_text_pm=True):
-    """PM -> 'PM' (si as_text_pm) o None; números -> float o string si no convertible."""
     if isinstance(v, str) and v.strip().upper() == "PM":
         return "PM" if as_text_pm else None
     try:
@@ -370,7 +394,6 @@ if st.button("Subir TODO a Ninox (tabla REPORTE)"):
     if df_final is None or df_final.empty:
         st.error("Primero pulsa 'Procesar'.")
     else:
-        # 1) Campos disponibles en Ninox
         try:
             ninox_fields = ninox_get_table_fields(TEAM_ID, DATABASE_ID, report_table_id)
             if not ninox_fields:
@@ -382,17 +405,15 @@ if st.button("Subir TODO a Ninox (tabla REPORTE)"):
         with st.expander("Campos detectados en Ninox"):
             st.write(sorted(ninox_fields))
 
-        # 2) Preparar payload enviando TODAS las columnas que existan en Ninox
         rows, skipped_cols = [], set()
         iterator = df_final.head(1).iterrows() if debug_uno else df_final.iterrows()
 
         for _, row in iterator:
             fields_payload = {}
             for col in df_final.columns:
-                dest = resolve_dest_name(col)  # Hp(...) -> Hp (...), y personalizados
+                dest = resolve_dest_name(col)
                 if ninox_fields and dest not in ninox_fields:
-                    skipped_cols.add(dest)
-                    continue
+                    skipped_cols.add(dest); continue
                 val = row[col]
                 if dest in {"Hp (10)", "Hp (0.07)", "Hp (3)"}:
                     val = _hp_value(val, as_text_pm=subir_pm_como_texto)
@@ -405,7 +426,6 @@ if st.button("Subir TODO a Ninox (tabla REPORTE)"):
             st.caption("Payload (primer registro):")
             st.json(rows[:1])
 
-        # 3) Subir en lotes
         with st.spinner("Subiendo a Ninox..."):
             res = ninox_insert_records(TEAM_ID, DATABASE_ID, report_table_id, rows, batch_size=300)
 
@@ -413,7 +433,6 @@ if st.button("Subir TODO a Ninox (tabla REPORTE)"):
             st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
             if skipped_cols:
                 st.info("Columnas omitidas por no existir en Ninox:\n- " + "\n- ".join(sorted(skipped_cols)))
-            # Vista rápida de lo que quedó en la tabla
             try:
                 df_check = ninox_fetch_records(TEAM_ID, DATABASE_ID, report_table_id)
                 st.caption("Contenido reciente en REPORTE:")
@@ -423,6 +442,4 @@ if st.button("Subir TODO a Ninox (tabla REPORTE)"):
         else:
             st.error(f"❌ Error al subir: {res.get('error')}")
             if skipped_cols:
-                st.info("Revisa/crea en Ninox los campos omitidos:\n- " + "\n- ".join(sorted(skipped_cols)))  # noqa
-
-
+                st.info("Revisa/crea en Ninox los campos omitidos:\n- " + "\n- ".join(sorted(skipped_cols)))
