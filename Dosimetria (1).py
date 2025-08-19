@@ -206,7 +206,7 @@ with st.sidebar:
     periodo_actual = st.selectbox("Periodo actual", per_valid, index=0 if per_valid else None)
     periodos_anteriores = st.multiselect(
         "Periodos anteriores (para ANUAL)",
-        [p for p in per_valid si p != periodo_actual],
+        [p for p in per_valid if p != periodo_actual],
         default=[per_valid[1]] if len(per_valid) > 1 else []
     )
     comp_opts = ["(todas)"] + sorted(base["COMPAÑÍA"].dropna().astype(str).unique().tolist())
@@ -713,6 +713,7 @@ st.download_button(
     file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
 
 
 
