@@ -1,4 +1,3 @@
-# app.py — Reporte de Dosimetría desde Ninox con Excel “plantilla” (sumando por NOMBRE + CÉDULA)
 import streamlit as st
 import pandas as pd
 import requests
@@ -150,7 +149,7 @@ def pm_or_sum(raws, numeric_sum) -> Any:
         arr = [raws]
 
     vals = [str(x).upper() for x in arr if str(x).strip() != ""]
-    if vals and all(v == "PM" for v in vals):
+    if vals && all(v == "PM" for v in vals):
         return "PM"
 
     # Proteger numeric_sum
@@ -207,7 +206,7 @@ with st.sidebar:
     periodo_actual = st.selectbox("Periodo actual", per_valid, index=0 if per_valid else None)
     periodos_anteriores = st.multiselect(
         "Periodos anteriores (para ANUAL)",
-        [p for p in per_valid if p != periodo_actual],
+        [p for p in per_valid si p != periodo_actual],
         default=[per_valid[1]] if len(per_valid) > 1 else []
     )
     comp_opts = ["(todas)"] + sorted(base["COMPAÑÍA"].dropna().astype(str).unique().tolist())
@@ -243,10 +242,10 @@ df_curr = df_curr.sort_values("FECHA_DE_LECTURA_DT")  # para que 'last' sea el m
 gb_curr_sum = df_curr.groupby(keys, as_index=False).agg({
     "PERIODO DE LECTURA": "last",
     "COMPAÑÍA": "last",
-    "CÓDIGO DE DOSÍMETRO": "last",  # solo para referencia (último usado)
+    "CÓDIGO DE DOSÍMETRO": "last",
     "NOMBRE": "last",
     "CÉDULA": "last",
-    "FECHA_DE_LECTURA_DT": "max",   # la más reciente
+    "FECHA_DE_LECTURA_DT": "max",
     "TIPO DE DOSÍMETRO": "last",
     "Hp10_NUM": "sum",
     "Hp007_NUM": "sum",
@@ -714,4 +713,5 @@ st.download_button(
     file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
 
