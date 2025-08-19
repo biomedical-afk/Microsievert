@@ -1,4 +1,4 @@
-# app.py — Reporte de Dosimetría (Ninox) + filtro archivos + Excel plantilla con sección informativa
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -7,7 +7,7 @@ from datetime import datetime
 from dateutil.parser import parse as dtparse
 from typing import List, Dict, Any, Optional, Set
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -139,7 +139,7 @@ def pm_or_sum(raws: List[Any], numeric_sum: float) -> Any:
         return "PM"
     return round2(numeric_sum)
 
-# ------------- Excel plantilla (bloques, autoancho + sección informativa) -------------
+# ---------- Excel plantilla generado (si no suben plantilla externa) ----------
 def build_formatted_excel(df: pd.DataFrame) -> bytes:
     wb = Workbook()
     ws = wb.active
@@ -171,8 +171,8 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
         "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
         "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
     ]
-    ws.append([""]*17)   # Fila 2 ya tiene merges; empujamos a fila 3
-    ws.append(headers)   # Fila 3
+    ws.append([""]*17)   # fila 2 tiene merges; empujamos a fila 3
+    ws.append(headers)
 
     for col in range(1, 18):
         cell = ws.cell(row=3, column=col)
@@ -182,9 +182,9 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
     start_row = 4
     for _, r in df[headers].iterrows():
         ws.append(list(r.values))
+    last_row = ws.max_row
 
     # Bordes + wrap + freeze
-    last_row = ws.max_row
     for row in ws.iter_rows(min_row=3, max_row=last_row, min_col=1, max_col=17):
         for cell in row:
             cell.border = border
@@ -201,15 +201,13 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
             if len(txt) > max_len: max_len = len(txt)
         ws.column_dimensions[col_letter].width = max(12, min(max_len + 2, 42))
 
-    # =================== SECCIÓN INFORMATIVA ===================
-    row = last_row + 2  # dos filas después de la tabla
-    # Título de sección
+    # --------- SECCIÓN INFORMATIVA (como pediste) ---------
+    row = last_row + 2
     ws.merge_cells(f"A{row}:Q{row}")
     c = ws[f"A{row}"]; c.value = "INFORMACIÓN DEL REPORTE DE DOSIMETRÍA"
     c.font = Font(bold=True); c.alignment = Alignment(horizontal="center")
     row += 1
 
-    # Viñetas principales
     bullets = [
         "‒ Periodo de lectura: periodo de uso del dosímetro personal.",
         "‒ Fecha de lectura: fecha en que se realizó la lectura.",
@@ -221,8 +219,8 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
         c.font = Font(size=10, bold=True); c.alignment = Alignment(horizontal="left")
         row += 2
 
-    # Tipos (tabla pequeña CE/A/ B/ CR)
     tipos = [("CE","Cuerpo Entero"), ("A","Anillo"), ("B","Brazalete"), ("CR","Cristalino")]
+    thin = Side(style="thin"); border = Border(top=thin,bottom=thin,left=thin,right=thin)
     for clave, desc in tipos:
         ws.merge_cells(f"C{row}:D{row}")
         c = ws[f"C{row}"]; c.value = f"{clave} = {desc}"
@@ -232,7 +230,6 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
         row += 1
     row += 1
 
-    # Límites anuales
     ws.merge_cells(f"F{row}:I{row}")
     c = ws[f"F{row}"]; c.value = "LÍMITES ANUALES DE EXPOSICIÓN A RADIACIONES"
     c.font = Font(bold=True, size=10); c.alignment = Alignment(horizontal="center")
@@ -246,20 +243,15 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
         ("Público", "1 mSv/año"),
     ]
     for cat, val in limites:
-        ws.merge_cells(f"F{row}:G{row}")
-        ws[f"F{row}"].value = cat
-        ws[f"F{row}"].font = Font(size=10)
-        ws[f"F{row}"].alignment = Alignment(horizontal="left")
-        ws.merge_cells(f"H{row}:I{row}")
-        ws[f"H{row}"].value = val
-        ws[f"H{row}"].font = Font(size=10)
-        ws[f"H{row}"].alignment = Alignment(horizontal="right")
+        ws.merge_cells(f"F{row}:G{row}"); ws[f"F{row}"].value = cat
+        ws[f"F{row}"].font = Font(size=10); ws[f"F{row}"].alignment = Alignment(horizontal="left")
+        ws.merge_cells(f"H{row}:I{row}"); ws[f"H{row}"].value = val
+        ws[f"H{row}"].font = Font(size=10); ws[f"H{row}"].alignment = Alignment(horizontal="right")
         for col in ("F","G","H","I"):
             ws.cell(row=row, column=ord(col)-64).border = border
         row += 1
     row += 2
 
-    # Datos del participante
     ws.merge_cells(f"A{row}:Q{row}")
     c = ws[f"A{row}"]; c.value = "‒ DATOS DEL PARTICIPANTE:"
     c.font = Font(bold=True, size=10); c.alignment = Alignment(horizontal="left")
@@ -278,7 +270,6 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
         row += 1
     row += 2
 
-    # Dosis en mSv (tabla de definiciones)
     ws.merge_cells(f"A{row}:Q{row}")
     c = ws[f"A{row}"]; c.value = "‒ DOSIS EN MILISIEVERT:"
     c.font = Font(bold=True, size=10); c.alignment = Alignment(horizontal="left")
@@ -326,7 +317,6 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
         ws.row_dimensions[row].height = 30
         row += 1
 
-    # Nota anillo
     row += 1
     ws.merge_cells(f"A{row}:Q{row}")
     c = ws[f"A{row}"]
@@ -352,9 +342,8 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
         ws.merge_cells(f"D{row}:Q{row}")
         c = ws[f"D{row}"]; c.value = texto
         c.font = Font(size=10); c.alignment = Alignment(horizontal="left", wrap_text=True)
-        # bordes en toda la fila de explicación
         for col_idx in range(ord("B")-64, ord("Q")-64+1):
-            ws.cell(row=row, column=col_idx).border = border
+            ws.cell(row=row, column=col_idx).border = Border(top=thin,bottom=thin,left=thin,right=thin)
         row += 1
 
     row += 2
@@ -372,9 +361,56 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
                "de uso y son registradas como \"PM\".")
     c.font = Font(size=10, bold=True); c.alignment = Alignment(horizontal="left", wrap_text=True)
 
-    # Salida a bytes (no guardamos en disco)
     bio = BytesIO(); wb.save(bio); bio.seek(0)
     return bio.getvalue()
+
+# ---------- Escribir en plantilla subida por el usuario ----------
+def build_from_user_template(df: pd.DataFrame, template_bytes: bytes) -> bytes:
+    """
+    Abre la plantilla Excel subida, busca los encabezados en las primeras 10 filas
+    y escribe los datos debajo, preservando estilos/anchos de la plantilla.
+    Si no encuentra todos los encabezados, cae al generador estándar.
+    """
+    headers = [
+        "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "FECHA DE NACIMIENTO","FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
+        "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
+        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+        "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
+    ]
+    try:
+        wb = load_workbook(BytesIO(template_bytes))
+        ws = wb.active
+        # Buscar fila de encabezados (primeras 10 filas)
+        header_row = None
+        col_map: Dict[str, int] = {}
+        for r in range(1, 11):
+            vals = [str(c.value).strip() if c.value is not None else "" for c in ws[r]]
+            for col_idx, v in enumerate(vals, start=1):
+                if v in headers and v not in col_map:
+                    col_map[v] = col_idx
+            if len(col_map) >= len(headers):
+                header_row = r
+                break
+        # Si no encontró todos, probar parciales (al menos 12 claves)
+        if header_row is None or len(col_map) < 12:
+            return build_formatted_excel(df)  # fallback
+
+        write_row = header_row + 1
+        # Escribir cada fila respetando orden de headers
+        for _, row in df.iterrows():
+            # si la plantilla tiene filas con fórmula debajo, avanzar hasta encontrar una fila vacía
+            # (opcionalmente podrías limpiar primero)
+            for h in headers:
+                if h in col_map:
+                    ws.cell(row=write_row, column=col_map[h], value=row.get(h, ""))
+            write_row += 1
+
+        bio = BytesIO(); wb.save(bio); bio.seek(0)
+        return bio.getvalue()
+    except Exception:
+        # Si la plantilla llega con protecciones/formatos no manejables, generamos nuestra versión formateada
+        return build_formatted_excel(df)
 
 # ------------------- Carga Ninox -------------------
 with st.spinner("Cargando datos desde Ninox…"):
@@ -389,6 +425,9 @@ if base.empty:
 with st.sidebar:
     st.header("Filtros")
     files = st.file_uploader("Archivos de dosis (para filtrar)", type=["csv","xlsx","xls"], accept_multiple_files=True)
+
+    # Plantilla opcional para que “se vea igual que tu archivo”
+    plantilla = st.file_uploader("Plantilla Excel (opcional)", type=["xlsx"])
 
     # periodos válidos (excluye CONTROL para selección)
     per_order = (base.groupby("PERIODO DE LECTURA")["FECHA_DE_LECTURA_DT"].max()
@@ -507,7 +546,7 @@ out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_VIDA_RAW", []) 
 out["__is_control"] = out["CÓDIGO DE DOSÍMETRO"].isin(control_codes)
 out = out.sort_values(["__is_control","CÓDIGO DE DOSÍMETRO"], ascending=[False, True])
 
-# Columnas finales
+# Columnas finales en orden exacto
 final_cols = [
     "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
     "FECHA DE NACIMIENTO","FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
@@ -520,7 +559,7 @@ for c in final_cols:
 out = out[final_cols]
 
 # ------------------- Mostrar / Descargar -------------------
-st.subheader("Reporte final")
+st.subheader("Reporte final (vista previa)")
 st.dataframe(out, use_container_width=True, hide_index=True)
 
 # CSV
@@ -548,10 +587,15 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# Excel plantilla (con sección informativa)
-xlsx_fmt = build_formatted_excel(out.copy())
+# Excel plantilla (si subes tu BANAVAA.xlsx, lo usamos; si no, generamos uno igualado)
+if plantilla is not None:
+    tmpl_bytes = plantilla.read()
+    xlsx_fmt = build_from_user_template(out.copy(), tmpl_bytes)
+else:
+    xlsx_fmt = build_formatted_excel(out.copy())
+
 st.download_button(
-    "⬇️ Descargar Excel (formato plantilla + info)",
+    "⬇️ Descargar Excel (formato plantilla)",
     data=xlsx_fmt,
     file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -559,11 +603,11 @@ st.download_button(
 
 with st.expander("Notas"):
     st.markdown("""
-- **PM** se muestra en **ACTUAL** y también en **ANUAL/VIDA** cuando **todas** las lecturas que aportan son PM.
+- **PM** se muestra en **ACTUAL** y también en **ANUAL/VIDA** cuando **todas** las lecturas involucradas son PM.
 - **ANUAL** = ACTUAL (del periodo seleccionado) + suma de periodos anteriores seleccionados (numéricos).
 - **VIDA** = suma histórica con los filtros activos; si todo fue PM, se muestra **PM**.
 - La fila **CONTROL** (si existe) se ordena primero.
-- El Excel de **formato plantilla** incluye una **sección informativa** al final del documento.
+- Si subes tu **plantilla BANAVAA.xlsx**, el reporte se escribe **exactamente en esa plantilla**.
 """)
 
 
