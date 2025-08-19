@@ -1,4 +1,4 @@
-# app.py — Reporte de Dosimetría (Ninox) con filtro por archivos + PM visible
+# app.py — Reporte de Dosimetría (Ninox) + filtro por archivos + Excel maquetado
 # Requisitos:
 #   pip install streamlit pandas requests openpyxl python-dateutil
 
@@ -9,13 +9,16 @@ from io import BytesIO
 from datetime import datetime
 from dateutil.parser import parse as dtparse
 from typing import List, Dict, Any, Optional, Set
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 # ================== CREDENCIALES NINOX ==================
 API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"  # <-- tu token
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
-TABLE_ID    = "C"   # ID interno de la tabla REPORTE (ajústalo si difiere)
+TABLE_ID    = "C"   # ID interno de la tabla REPORTE
 # ========================================================
 
 st.set_page_config(page_title="Reporte de Dosimetría — Ninox", layout="wide")
@@ -81,11 +84,11 @@ def normalize_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
             "FECHA DE NACIMIENTO": f.get("FECHA DE NACIMIENTO"),
             "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
             "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
-            # RAW (para mostrar, conserva PM)
+            # RAW (mostrar, conserva PM)
             "Hp10_RAW": as_value(f.get("Hp (10)")),
             "Hp007_RAW": as_value(f.get("Hp (0.07)")),
             "Hp3_RAW": as_value(f.get("Hp (3)")),
-            # NUM (para cálculo)
+            # NUM (cálculo)
             "Hp10_NUM": as_num(f.get("Hp (10)")),
             "Hp007_NUM": as_num(f.get("Hp (0.07)")),
             "Hp3_NUM": as_num(f.get("Hp (3)")),
@@ -103,26 +106,18 @@ def normalize_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
         df["FECHA_DE_LECTURA_DT"] = pd.NaT
     return df
 
-def to_excel_bytes(df: pd.DataFrame, sheet_name="Reporte"):
-    out = BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name=sheet_name)
-    out.seek(0)
-    return out
-
 def read_codes_from_files(files) -> Set[str]:
     """Lee CSV/Excel y extrae códigos de dosímetro (columna candidata o patrón WB\d+)."""
     codes: Set[str] = set()
+    from io import BytesIO
     for f in files:
-        raw = f.read()
-        f.seek(0)
+        raw = f.read(); f.seek(0)
         name = f.name.lower()
         df = None
         try:
             if name.endswith((".xlsx", ".xls")):
                 df = pd.read_excel(BytesIO(raw))
             else:
-                # autodetecta separador/encoding
                 for enc in ("utf-8-sig", "latin-1"):
                     try:
                         df = pd.read_csv(BytesIO(raw), sep=None, engine="python", encoding=enc)
@@ -136,13 +131,11 @@ def read_codes_from_files(files) -> Set[str]:
         if df is None or df.empty:
             continue
 
-        # Buscar columna por nombre
         cand = None
         for c in df.columns:
             cl = str(c).lower()
             if any(k in cl for k in ["dosim", "código", "codigo", "wb", "dosímetro", "dosimetro"]):
                 cand = c; break
-        # Si no la encontró, buscar patrón tipo WB000123
         if cand is None:
             for c in df.columns:
                 if df[c].astype(str).str.contains(r"^WB\d{5,}$", case=False, na=False).any():
@@ -153,6 +146,80 @@ def read_codes_from_files(files) -> Set[str]:
         col = df[cand].astype(str).str.strip()
         codes |= set([c for c in col if c and c.lower() != "nan"])
     return codes
+
+# --------- Excel maquetado (estilo plantilla) ----------
+def build_formatted_excel(df: pd.DataFrame) -> bytes:
+    """
+    Genera un Excel con encabezados:
+    [PERIODO..., COMPAÑÍA, CÓDIGO..., NOMBRE, CÉDULA, FECHA NAC., FECHA Y HORA DE LECTURA, TIPO]
+    + bloques: DOSIS ACTUAL / DOSIS ANUAL / DOSIS DE POR VIDA (Hp10, Hp0.07, Hp3)
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Reporte"
+
+    # Estilos
+    bold = Font(bold=True)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin = Side(style="thin")
+    border = Border(top=thin, bottom=thin, left=thin, right=thin)
+
+    # Título
+    ws.merge_cells("A1:Q1")
+    ws["A1"] = "REPORTE DE DOSIMETRÍA"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A1"].alignment = center
+
+    # Fila 2: cabeceras de bloques
+    ws.merge_cells("A2:H3"); ws["A2"] = ""    # área datos fijos
+    ws.merge_cells("I2:K2"); ws["I2"] = "DOSIS ACTUAL (mSv)"
+    ws.merge_cells("L2:N2"); ws["L2"] = "DOSIS ANUAL (mSv)"
+    ws.merge_cells("O2:Q2"); ws["O2"] = "DOSIS DE POR VIDA (mSv)"
+    for c in ["I2","L2","O2"]:
+        ws[c].font = bold; ws[c].alignment = center
+
+    # Fila 3: subcolumnas Hp
+    ws["I3"], ws["J3"], ws["K3"] = "Hp(10)", "Hp(0.07)", "Hp(3)"
+    ws["L3"], ws["M3"], ws["N3"] = "Hp(10)", "Hp(0.07)", "Hp(3)"
+    ws["O3"], ws["P3"], ws["Q3"] = "Hp(10)", "Hp(0.07)", "Hp(3)"
+    for c in ["I3","J3","K3","L3","M3","N3","O3","P3","Q3"]:
+        ws[c].font = bold; ws[c].alignment = center; ws[c].border = border
+
+    # Fila 4: cabeceras de datos fijos
+    headers = [
+        "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "FECHA DE NACIMIENTO","FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
+        "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
+        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+        "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
+    ]
+    ws.append(headers)
+    for col in range(1, 18):
+        cell = ws.cell(row=4, column=col)
+        cell.font = bold; cell.alignment = center; cell.border = border
+
+    # Ancho de columnas
+    widths = [16,16,18,24,16,20,22,16,12,12,12,12,14,12,12,14,12]
+    for idx, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = w
+
+    # Datos
+    start_row = 5
+    for _, r in df.iterrows():
+        ws.append(list(r.values))
+    # Bordes para todo el rango de datos
+    last_row = ws.max_row
+    for row in ws.iter_rows(min_row=4, max_row=last_row, min_col=1, max_col=17):
+        for cell in row:
+            cell.border = border
+            if cell.row >= 5:
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    # Salida
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
 
 # ------------------- Carga Ninox -------------------
 with st.spinner("Cargando datos desde Ninox…"):
@@ -232,11 +299,11 @@ for code, sub in df.groupby("CÓDIGO DE DOSÍMETRO", as_index=False):
         "FECHA DE NACIMIENTO": ult.get("FECHA DE NACIMIENTO"),
         "FECHA Y HORA DE LECTURA": ult.get("FECHA DE LECTURA"),
         "TIPO DE DOSÍMETRO": ult.get("TIPO DE DOSÍMETRO"),
-        # RAW (mostrar)
+        # Mostrar (conserva PM)
         "Hp10_ACTUAL":  ult.get("Hp10_RAW"),
         "Hp007_ACTUAL": ult.get("Hp007_RAW"),
         "Hp3_ACTUAL":   ult.get("Hp3_RAW"),
-        # NUM (calcular)
+        # Num para cálculos
         "Hp10_ACTUAL_NUM":  ult.get("Hp10_NUM", 0.0),
         "Hp007_ACTUAL_NUM": ult.get("Hp007_NUM", 0.0),
         "Hp3_ACTUAL_NUM":   ult.get("Hp3_NUM", 0.0),
@@ -273,11 +340,11 @@ out["Hp10_ANUAL"]  = out["Hp10_ACTUAL_NUM"]  + out["Hp10_ANT_SUM"]
 out["Hp007_ANUAL"] = out["Hp007_ACTUAL_NUM"] + out["Hp007_ANT_SUM"]
 out["Hp3_ANUAL"]   = out["Hp3_ACTUAL_NUM"]   + out["Hp3_ANT_SUM"]
 
-# Redondeos de numéricos
+# Redondeos de numéricos (ANUAL y VIDA)
 for c in ["Hp10_ANUAL", "Hp007_ANUAL", "Hp3_ANUAL", "Hp10_VIDA", "Hp007_VIDA", "Hp3_VIDA"]:
     out[c] = out[c].apply(round2)
 
-# Mantener PM en ACTUAL (si el RAW era PM); si no, mostrar número redondeado
+# Mantener PM en ACTUAL (si era PM); si no, redondear número
 def show_raw_or_num(raw):
     return raw if str(raw).upper() == "PM" else round2(float(raw))
 
@@ -289,7 +356,7 @@ out["Hp3_ACTUAL"]   = out["Hp3_ACTUAL"].apply(show_raw_or_num)
 out["__is_control"] = out["CÓDIGO DE DOSÍMETRO"].isin(control_codes)
 out = out.sort_values(["__is_control", "CÓDIGO DE DOSÍMETRO"], ascending=[False, True])
 
-# Renombrar a encabezados finales
+# Renombrar a encabezados finales y ordenar columnas
 rename_map = {
     "Hp10_ACTUAL":  "Hp (10) ACTUAL",
     "Hp007_ACTUAL": "Hp (0.07) ACTUAL",
@@ -303,7 +370,6 @@ rename_map = {
 }
 out = out.rename(columns=rename_map)
 
-# Orden final de columnas según tu plantilla
 final_cols = [
     "PERIODO DE LECTURA", "COMPAÑÍA", "CÓDIGO DE DOSÍMETRO", "NOMBRE", "CÉDULA",
     "FECHA DE NACIMIENTO", "FECHA Y HORA DE LECTURA", "TIPO DE DOSÍMETRO",
@@ -320,6 +386,7 @@ out = out[final_cols]
 st.subheader("Reporte final")
 st.dataframe(out, use_container_width=True, hide_index=True)
 
+# CSV
 csv_bytes = out.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "⬇️ Descargar CSV (UTF-8 con BOM)",
@@ -328,19 +395,38 @@ st.download_button(
     mime="text/csv"
 )
 
-xlsx_bytes = to_excel_bytes(out)
+# Excel simple
+def to_excel_simple(df: pd.DataFrame, sheet_name="Reporte"):
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name=sheet_name)
+    bio.seek(0)
+    return bio.getvalue()
+
+xlsx_simple = to_excel_simple(out)
 st.download_button(
-    "⬇️ Descargar Excel",
-    data=xlsx_bytes,
-    file_name=f"reporte_dosimetria_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+    "⬇️ Descargar Excel (tabla simple)",
+    data=xlsx_simple,
+    file_name=f"reporte_dosimetria_tabla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+# Excel maquetado tipo plantilla
+xlsx_fmt = build_formatted_excel(out.copy())
+st.download_button(
+    "⬇️ Descargar Excel (formato plantilla)",
+    data=xlsx_fmt,
+    file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
 with st.expander("Notas"):
     st.markdown("""
-- **PM** se mantiene en las columnas **ACTUAL**; para **ANUAL** y **VIDA** se considera como **0.00** para las sumas.
+- **PM** se mantiene en **ACTUAL**; en **ANUAL** y **VIDA** se considera como **0.00** para las sumas.
 - **ANUAL** = último valor del periodo seleccionado (**ACTUAL**) + **suma** de los periodos anteriores seleccionados.
 - **VIDA** = suma histórica de todas las lecturas (con los filtros activos).
 - La fila **CONTROL** (si existe) se muestra primero.
 """)
+
+
 
