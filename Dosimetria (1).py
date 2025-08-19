@@ -149,7 +149,7 @@ def pm_or_sum(raws, numeric_sum) -> Any:
         arr = [raws]
 
     vals = [str(x).upper() for x in arr if str(x).strip() != ""]
-    if vals && all(v == "PM" for v in vals):
+    if vals and all(v == "PM" for v in vals):
         return "PM"
 
     # Proteger numeric_sum
@@ -713,5 +713,6 @@ st.download_button(
     file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
 
 
