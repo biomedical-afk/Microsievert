@@ -1,7 +1,4 @@
-# app.py — Reporte de Dosimetría (Ninox) + filtro por archivos + Excel maquetado
-# Requisitos:
-#   pip install streamlit pandas requests openpyxl python-dateutil
-
+# app.py — Reporte de Dosimetría (Ninox) + filtro por archivos + Excel plantilla
 import streamlit as st
 import pandas as pd
 import requests
@@ -13,13 +10,13 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ================== CREDENCIALES NINOX ==================
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"  # <-- tu token
+# ============== CREDENCIALES NINOX (AJUSTA SI CAMBIA) ==============
+API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
-TABLE_ID    = "C"   # ID interno de la tabla REPORTE
-# ========================================================
+TABLE_ID    = "C"  # Tabla REPORTE
+# ===================================================================
 
 st.set_page_config(page_title="Reporte de Dosimetría — Ninox", layout="wide")
 st.title("Reporte de Dosimetría — Actual, Anual y de por Vida")
@@ -30,27 +27,19 @@ def headers() -> Dict[str, str]:
 
 def as_value(v: Any):
     """Devuelve número si lo es; mantiene 'PM' para mostrar."""
-    if v is None:
-        return ""
+    if v is None: return ""
     s = str(v).strip().replace(",", ".")
-    if s.upper() == "PM":
-        return "PM"
-    try:
-        return float(s)
-    except Exception:
-        return s
+    if s.upper() == "PM": return "PM"
+    try: return float(s)
+    except Exception: return s
 
 def as_num(v: Any) -> float:
     """Para cálculos: convierte a número; PM o vacío -> 0.0."""
-    if v is None:
-        return 0.0
+    if v is None: return 0.0
     s = str(v).strip().replace(",", ".")
-    if s == "" or s.upper() == "PM":
-        return 0.0
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
+    if s == "" or s.upper() == "PM": return 0.0
+    try: return float(s)
+    except Exception: return 0.0
 
 def round2(x: float) -> float:
     return float(f"{x:.2f}")
@@ -62,11 +51,9 @@ def fetch_all_records(table_id: str, page_size: int = 1000) -> List[Dict[str, An
         r = requests.get(url, headers=headers(), params={"limit": page_size, "skip": skip}, timeout=60)
         r.raise_for_status()
         chunk = r.json()
-        if not chunk:
-            break
+        if not chunk: break
         out.extend(chunk)
-        if len(chunk) < page_size:
-            break
+        if len(chunk) < page_size: break
         skip += page_size
     return out
 
@@ -85,22 +72,21 @@ def normalize_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
             "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
             "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
             # RAW (mostrar, conserva PM)
-            "Hp10_RAW": as_value(f.get("Hp (10)")),
+            "Hp10_RAW":  as_value(f.get("Hp (10)")),
             "Hp007_RAW": as_value(f.get("Hp (0.07)")),
-            "Hp3_RAW": as_value(f.get("Hp (3)")),
+            "Hp3_RAW":  as_value(f.get("Hp (3)")),
             # NUM (cálculo)
-            "Hp10_NUM": as_num(f.get("Hp (10)")),
+            "Hp10_NUM":  as_num(f.get("Hp (10)")),
             "Hp007_NUM": as_num(f.get("Hp (0.07)")),
-            "Hp3_NUM": as_num(f.get("Hp (3)")),
+            "Hp3_NUM":  as_num(f.get("Hp (3)")),
         })
     df = pd.DataFrame(rows)
-    # Parseo de fecha/hora
+    # Parseo de fecha/hora robusto
     if "FECHA DE LECTURA" in df.columns:
         df["FECHA_DE_LECTURA_DT"] = pd.to_datetime(
             df["FECHA DE LECTURA"].apply(
                 lambda x: dtparse(str(x), dayfirst=True) if pd.notna(x) and str(x).strip() != "" else pd.NaT
-            ),
-            errors="coerce"
+            ), errors="coerce"
         )
     else:
         df["FECHA_DE_LECTURA_DT"] = pd.NaT
@@ -118,7 +104,7 @@ def read_codes_from_files(files) -> Set[str]:
             if name.endswith((".xlsx", ".xls")):
                 df = pd.read_excel(BytesIO(raw))
             else:
-                for enc in ("utf-8-sig", "latin-1"):
+                for enc in ("utf-8-sig","latin-1"):
                     try:
                         df = pd.read_csv(BytesIO(raw), sep=None, engine="python", encoding=enc)
                         break
@@ -128,37 +114,36 @@ def read_codes_from_files(files) -> Set[str]:
                     df = pd.read_csv(BytesIO(raw))
         except Exception:
             continue
-        if df is None or df.empty:
-            continue
+        if df is None or df.empty: continue
 
         cand = None
         for c in df.columns:
             cl = str(c).lower()
-            if any(k in cl for k in ["dosim", "código", "codigo", "wb", "dosímetro", "dosimetro"]):
+            if any(k in cl for k in ["dosim","código","codigo","wb","dosímetro","dosimetro"]):
                 cand = c; break
         if cand is None:
             for c in df.columns:
                 if df[c].astype(str).str.contains(r"^WB\d{5,}$", case=False, na=False).any():
                     cand = c; break
-        if cand is None:
-            cand = df.columns[0]
+        if cand is None: cand = df.columns[0]
 
         col = df[cand].astype(str).str.strip()
-        codes |= set([c for c in col if c and c.lower() != "nan"])
+        codes |= set([c for c in col if c and c.lower()!="nan"])
     return codes
 
-# --------- Excel maquetado (estilo plantilla) ----------
+# PM en ANUAL/VIDA: si todas las lecturas que contribuyen son PM -> PM; de lo contrario, suma numérica
+def pm_or_sum(raws: List[Any], numeric_sum: float) -> Any:
+    vals = [str(x).upper() for x in raws if str(x).strip()!=""]
+    if vals and all(v == "PM" for v in vals):
+        return "PM"
+    return round2(numeric_sum)
+
+# ------------- Excel maquetado (bloques y auto ancho) -------------
 def build_formatted_excel(df: pd.DataFrame) -> bytes:
-    """
-    Genera un Excel con encabezados:
-    [PERIODO..., COMPAÑÍA, CÓDIGO..., NOMBRE, CÉDULA, FECHA NAC., FECHA Y HORA DE LECTURA, TIPO]
-    + bloques: DOSIS ACTUAL / DOSIS ANUAL / DOSIS DE POR VIDA (Hp10, Hp0.07, Hp3)
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Reporte"
 
-    # Estilos
     bold = Font(bold=True)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     thin = Side(style="thin")
@@ -170,22 +155,14 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
     ws["A1"].font = Font(bold=True, size=14)
     ws["A1"].alignment = center
 
-    # Fila 2: cabeceras de bloques
-    ws.merge_cells("A2:H3"); ws["A2"] = ""    # área datos fijos
+    # Bloques
     ws.merge_cells("I2:K2"); ws["I2"] = "DOSIS ACTUAL (mSv)"
     ws.merge_cells("L2:N2"); ws["L2"] = "DOSIS ANUAL (mSv)"
     ws.merge_cells("O2:Q2"); ws["O2"] = "DOSIS DE POR VIDA (mSv)"
     for c in ["I2","L2","O2"]:
         ws[c].font = bold; ws[c].alignment = center
 
-    # Fila 3: subcolumnas Hp
-    ws["I3"], ws["J3"], ws["K3"] = "Hp(10)", "Hp(0.07)", "Hp(3)"
-    ws["L3"], ws["M3"], ws["N3"] = "Hp(10)", "Hp(0.07)", "Hp(3)"
-    ws["O3"], ws["P3"], ws["Q3"] = "Hp(10)", "Hp(0.07)", "Hp(3)"
-    for c in ["I3","J3","K3","L3","M3","N3","O3","P3","Q3"]:
-        ws[c].font = bold; ws[c].alignment = center; ws[c].border = border
-
-    # Fila 4: cabeceras de datos fijos
+    # Encabezados
     headers = [
         "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
         "FECHA DE NACIMIENTO","FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
@@ -193,32 +170,36 @@ def build_formatted_excel(df: pd.DataFrame) -> bytes:
         "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
         "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
     ]
-    ws.append(headers)
+    ws.append([""]*17)  # fila 2 ya tiene los merges, empuja a fila 3
+    ws.append(headers)  # fila 3
+
     for col in range(1, 18):
-        cell = ws.cell(row=4, column=col)
+        cell = ws.cell(row=3, column=col)
         cell.font = bold; cell.alignment = center; cell.border = border
 
-    # Ancho de columnas
-    widths = [16,16,18,24,16,20,22,16,12,12,12,12,14,12,12,14,12]
-    for idx, w in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(idx)].width = w
-
     # Datos
-    start_row = 5
-    for _, r in df.iterrows():
+    for _, r in df[headers].iterrows():
         ws.append(list(r.values))
-    # Bordes para todo el rango de datos
+
+    # Bordes + wrap + freeze
     last_row = ws.max_row
-    for row in ws.iter_rows(min_row=4, max_row=last_row, min_col=1, max_col=17):
+    for row in ws.iter_rows(min_row=3, max_row=last_row, min_col=1, max_col=17):
         for cell in row:
             cell.border = border
-            if cell.row >= 5:
+            if cell.row >= 4:
                 cell.alignment = Alignment(vertical="center", wrap_text=True)
+    ws.freeze_panes = "A4"
 
-    # Salida
-    bio = BytesIO()
-    wb.save(bio)
-    bio.seek(0)
+    # Autoajuste de ancho
+    for col_cells in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col_cells[0].column)
+        for c in col_cells:
+            txt = "" if c.value is None else str(c.value)
+            if len(txt) > max_len: max_len = len(txt)
+        ws.column_dimensions[col_letter].width = max(12, min(max_len + 2, 42))
+
+    bio = BytesIO(); wb.save(bio); bio.seek(0)
     return bio.getvalue()
 
 # ------------------- Carga Ninox -------------------
@@ -233,7 +214,7 @@ if base.empty:
 # ------------------- Sidebar -------------------
 with st.sidebar:
     st.header("Filtros")
-    files = st.file_uploader("Archivos de dosis (para filtrar)", type=["csv", "xlsx", "xls"], accept_multiple_files=True)
+    files = st.file_uploader("Archivos de dosis (para filtrar)", type=["csv","xlsx","xls"], accept_multiple_files=True)
 
     # periodos válidos (excluye CONTROL para selección)
     per_order = (base.groupby("PERIODO DE LECTURA")["FECHA_DE_LECTURA_DT"].max()
@@ -272,7 +253,7 @@ if df.empty:
     st.stop()
 
 # ---- Identificar CONTROL (por nombre) y opción manual
-control_codes = set(df.loc[df["NOMBRE"].astype(str).str.strip().str.upper() == "CONTROL",
+control_codes = set(df.loc[df["NOMBRE"].astype(str).str.strip().str.upper()=="CONTROL",
                            "CÓDIGO DE DOSÍMETRO"].unique())
 all_codes = sorted(df["CÓDIGO DE DOSÍMETRO"].unique().tolist())
 manual_control = st.sidebar.selectbox("Código CONTROL (manual, opcional)", ["(auto)"] + all_codes, index=0)
@@ -288,8 +269,7 @@ def ultimo_en_periodo(g: pd.DataFrame, periodo: str) -> pd.Series:
 rows = []
 for code, sub in df.groupby("CÓDIGO DE DOSÍMETRO", as_index=False):
     ult = ultimo_en_periodo(sub, periodo_actual)
-    if ult.empty:
-        continue
+    if ult.empty: continue
     rows.append({
         "CÓDIGO DE DOSÍMETRO": code,
         "PERIODO DE LECTURA": periodo_actual,
@@ -300,9 +280,9 @@ for code, sub in df.groupby("CÓDIGO DE DOSÍMETRO", as_index=False):
         "FECHA Y HORA DE LECTURA": ult.get("FECHA DE LECTURA"),
         "TIPO DE DOSÍMETRO": ult.get("TIPO DE DOSÍMETRO"),
         # Mostrar (conserva PM)
-        "Hp10_ACTUAL":  ult.get("Hp10_RAW"),
-        "Hp007_ACTUAL": ult.get("Hp007_RAW"),
-        "Hp3_ACTUAL":   ult.get("Hp3_RAW"),
+        "Hp10_ACTUAL_RAW":  ult.get("Hp10_RAW"),
+        "Hp007_ACTUAL_RAW": ult.get("Hp007_RAW"),
+        "Hp3_ACTUAL_RAW":   ult.get("Hp3_RAW"),
         # Num para cálculos
         "Hp10_ACTUAL_NUM":  ult.get("Hp10_NUM", 0.0),
         "Hp007_ACTUAL_NUM": ult.get("Hp007_NUM", 0.0),
@@ -310,76 +290,62 @@ for code, sub in df.groupby("CÓDIGO DE DOSÍMETRO", as_index=False):
     })
 df_actual = pd.DataFrame(rows)
 
-# Suma de periodos anteriores (para ANUAL)
+# Suma períodos anteriores
 df_prev = df[df["PERIODO DE LECTURA"].astype(str).isin(periodos_anteriores)]
-prev_sum = (df_prev.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_NUM", "Hp007_NUM", "Hp3_NUM"]]
-            .sum()
-            .rename(columns={"Hp10_NUM": "Hp10_ANT_SUM",
-                             "Hp007_NUM": "Hp007_ANT_SUM",
-                             "Hp3_NUM": "Hp3_ANT_SUM"}))
+prev_sum = (df_prev.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_NUM","Hp007_NUM","Hp3_NUM"]]
+            .sum().rename(columns={"Hp10_NUM":"Hp10_ANT_SUM","Hp007_NUM":"Hp007_ANT_SUM","Hp3_NUM":"Hp3_ANT_SUM"}))
 
-# Suma de por vida (histórico, con filtros aplicados)
-vida_sum = (df.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_NUM", "Hp007_NUM", "Hp3_NUM"]]
-            .sum()
-            .rename(columns={"Hp10_NUM": "Hp10_VIDA",
-                             "Hp007_NUM": "Hp007_VIDA",
-                             "Hp3_NUM": "Hp3_VIDA"}))
+# Vida (histórico con filtros)
+vida_sum = (df.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_NUM","Hp007_NUM","Hp3_NUM"]]
+            .sum().rename(columns={"Hp10_NUM":"Hp10_VIDA_NUM","Hp007_NUM":"Hp007_VIDA_NUM","Hp3_NUM":"Hp3_VIDA_NUM"}))
+
+# También recolectamos RAW de todos los registros para poder decidir PM en VIDA
+vida_raw = (df.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_RAW","Hp007_RAW","Hp3_RAW"]]
+            .agg(list).rename(columns={"Hp10_RAW":"Hp10_VIDA_RAW","Hp007_RAW":"Hp007_VIDA_RAW","Hp3_RAW":"Hp3_VIDA_RAW"}))
 
 # Unir
 out = (df_actual.set_index("CÓDIGO DE DOSÍMETRO")
        .join(prev_sum, how="left")
-       .join(vida_sum, how="left")).reset_index()
+       .join(vida_sum, how="left")
+       .join(vida_raw, how="left")
+       ).reset_index()
 
-for c in ["Hp10_ANT_SUM", "Hp007_ANT_SUM", "Hp3_ANT_SUM", "Hp10_VIDA", "Hp007_VIDA", "Hp3_VIDA"]:
-    if c not in out:
-        out[c] = 0.0
+for c in ["Hp10_ANT_SUM","Hp007_ANT_SUM","Hp3_ANT_SUM","Hp10_VIDA_NUM","Hp007_VIDA_NUM","Hp3_VIDA_NUM"]:
+    if c not in out: out[c] = 0.0
     out[c] = out[c].fillna(0.0)
 
-# ANUAL = ACTUAL + ANTERIORES (numéricos)
-out["Hp10_ANUAL"]  = out["Hp10_ACTUAL_NUM"]  + out["Hp10_ANT_SUM"]
-out["Hp007_ANUAL"] = out["Hp007_ACTUAL_NUM"] + out["Hp007_ANT_SUM"]
-out["Hp3_ANUAL"]   = out["Hp3_ACTUAL_NUM"]   + out["Hp3_ANT_SUM"]
+# ---------- Construcción de columnas finales (PM lógico) ----------
+# ACTUAL: muestra PM si RAW era PM, si no número redondeado
+def show_raw_or_num(raw): return raw if str(raw).upper()=="PM" else round2(float(raw))
 
-# Redondeos de numéricos (ANUAL y VIDA)
-for c in ["Hp10_ANUAL", "Hp007_ANUAL", "Hp3_ANUAL", "Hp10_VIDA", "Hp007_VIDA", "Hp3_VIDA"]:
-    out[c] = out[c].apply(round2)
+out["Hp (10) ACTUAL"]   = out["Hp10_ACTUAL_RAW"].apply(show_raw_or_num)
+out["Hp (0.07) ACTUAL"] = out["Hp007_ACTUAL_RAW"].apply(show_raw_or_num)
+out["Hp (3) ACTUAL"]    = out["Hp3_ACTUAL_RAW"].apply(show_raw_or_num)
 
-# Mantener PM en ACTUAL (si era PM); si no, redondear número
-def show_raw_or_num(raw):
-    return raw if str(raw).upper() == "PM" else round2(float(raw))
+# ANUAL = ACTUAL_NUM + ANTERIORES_NUM, pero si ACTUAL es PM y no hay anteriores -> PM
+out["Hp (10) ANUAL"]   = out.apply(lambda r: pm_or_sum([r["Hp10_ACTUAL_RAW"]], r["Hp10_ACTUAL_NUM"] + r["Hp10_ANT_SUM"]), axis=1)
+out["Hp (0.07) ANUAL"] = out.apply(lambda r: pm_or_sum([r["Hp007_ACTUAL_RAW"]], r["Hp007_ACTUAL_NUM"] + r["Hp007_ANT_SUM"]), axis=1)
+out["Hp (3) ANUAL"]    = out.apply(lambda r: pm_or_sum([r["Hp3_ACTUAL_RAW"]],  r["Hp3_ACTUAL_NUM"]  + r["Hp3_ANT_SUM"]), axis=1)
 
-out["Hp10_ACTUAL"]  = out["Hp10_ACTUAL"].apply(show_raw_or_num)
-out["Hp007_ACTUAL"] = out["Hp007_ACTUAL"].apply(show_raw_or_num)
-out["Hp3_ACTUAL"]   = out["Hp3_ACTUAL"].apply(show_raw_or_num)
+# VIDA: si todas las lecturas RAW históricas son PM -> PM; si no, suma numérica vida
+out["Hp (10) VIDA"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_VIDA_RAW", []) or [], r["Hp10_VIDA_NUM"]), axis=1)
+out["Hp (0.07) VIDA"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_VIDA_RAW", []) or [], r["Hp007_VIDA_NUM"]), axis=1)
+out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_VIDA_RAW", []) or [],  r["Hp3_VIDA_NUM"]), axis=1)
 
-# CONTROL primero
+# Selección y orden de columnas para mostrar
+out["PERIODO DE LECTURA"] = out["PERIODO DE LECTURA"]
 out["__is_control"] = out["CÓDIGO DE DOSÍMETRO"].isin(control_codes)
-out = out.sort_values(["__is_control", "CÓDIGO DE DOSÍMETRO"], ascending=[False, True])
-
-# Renombrar a encabezados finales y ordenar columnas
-rename_map = {
-    "Hp10_ACTUAL":  "Hp (10) ACTUAL",
-    "Hp007_ACTUAL": "Hp (0.07) ACTUAL",
-    "Hp3_ACTUAL":   "Hp (3) ACTUAL",
-    "Hp10_ANUAL":   "Hp (10) ANUAL",
-    "Hp007_ANUAL":  "Hp (0.07) ANUAL",
-    "Hp3_ANUAL":    "Hp (3) ANUAL",
-    "Hp10_VIDA":    "Hp (10) VIDA",
-    "Hp007_VIDA":   "Hp (0.07) VIDA",
-    "Hp3_VIDA":     "Hp (3) VIDA",
-}
-out = out.rename(columns=rename_map)
+out = out.sort_values(["__is_control","CÓDIGO DE DOSÍMETRO"], ascending=[False, True])
 
 final_cols = [
-    "PERIODO DE LECTURA", "COMPAÑÍA", "CÓDIGO DE DOSÍMETRO", "NOMBRE", "CÉDULA",
-    "FECHA DE NACIMIENTO", "FECHA Y HORA DE LECTURA", "TIPO DE DOSÍMETRO",
-    "Hp (10) ACTUAL", "Hp (0.07) ACTUAL", "Hp (3) ACTUAL",
-    "Hp (10) ANUAL", "Hp (0.07) ANUAL", "Hp (3) ANUAL",
-    "Hp (10) VIDA", "Hp (0.07) VIDA", "Hp (3) VIDA",
+    "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+    "FECHA DE NACIMIENTO","FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
+    "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
+    "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+    "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
 ]
 for c in final_cols:
-    if c not in out.columns:
-        out[c] = ""
+    if c not in out.columns: out[c] = ""
 out = out[final_cols]
 
 # ------------------- Mostrar / Descargar -------------------
@@ -395,7 +361,7 @@ st.download_button(
     mime="text/csv"
 )
 
-# Excel simple
+# Excel simple (tabla)
 def to_excel_simple(df: pd.DataFrame, sheet_name="Reporte"):
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as w:
@@ -411,7 +377,7 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# Excel maquetado tipo plantilla
+# Excel en formato plantilla (bloques y auto ancho)
 xlsx_fmt = build_formatted_excel(out.copy())
 st.download_button(
     "⬇️ Descargar Excel (formato plantilla)",
@@ -422,10 +388,10 @@ st.download_button(
 
 with st.expander("Notas"):
     st.markdown("""
-- **PM** se mantiene en **ACTUAL**; en **ANUAL** y **VIDA** se considera como **0.00** para las sumas.
-- **ANUAL** = último valor del periodo seleccionado (**ACTUAL**) + **suma** de los periodos anteriores seleccionados.
-- **VIDA** = suma histórica de todas las lecturas (con los filtros activos).
-- La fila **CONTROL** (si existe) se muestra primero.
+- **PM**: se muestra en **ACTUAL** y también en **ANUAL/VIDA** cuando **todas** las lecturas que aportan son PM.
+- **ANUAL** = último del periodo (**ACTUAL**) + suma de periodos anteriores seleccionados (numéricos).
+- **VIDA** = suma histórica con los filtros activos; si todo fue PM, se muestra **PM**.
+- La fila **CONTROL** (si existe) se ordena primero.
 """)
 
 
