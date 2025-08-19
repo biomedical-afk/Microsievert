@@ -1,5 +1,6 @@
-# app.py — Ninox + filtro por archivos de dosis → Reporte Actual / Anual / Vida
-# pip install streamlit pandas requests openpyxl python-dateutil
+# app.py — Reporte de Dosimetría (Ninox) con filtro por archivos + PM visible
+# Requisitos:
+#   pip install streamlit pandas requests openpyxl python-dateutil
 
 import streamlit as st
 import pandas as pd
@@ -9,22 +10,35 @@ from datetime import datetime
 from dateutil.parser import parse as dtparse
 from typing import List, Dict, Any, Optional, Set
 
-# ======= CREDENCIALES NINOX =======
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"
+# ================== CREDENCIALES NINOX ==================
+API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"  # <-- tu token
 TEAM_ID     = "ihp8o8AaLzfodwc4J"
 DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
-TABLE_ID    = "C"   # ID de la tabla REPORTE
-# ==================================
+TABLE_ID    = "C"   # ID interno de la tabla REPORTE (ajústalo si difiere)
+# ========================================================
 
-st.set_page_config(page_title="Reporte de Dosimetría (Ninox)", layout="wide")
+st.set_page_config(page_title="Reporte de Dosimetría — Ninox", layout="wide")
 st.title("Reporte de Dosimetría — Actual, Anual y de por Vida")
 
-# ----------------- Utils -----------------
+# ---------------------- Utilidades ----------------------
 def headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
-def as_float(v: Any) -> float:
+def as_value(v: Any):
+    """Devuelve número si lo es; mantiene 'PM' para mostrar."""
+    if v is None:
+        return ""
+    s = str(v).strip().replace(",", ".")
+    if s.upper() == "PM":
+        return "PM"
+    try:
+        return float(s)
+    except Exception:
+        return s
+
+def as_num(v: Any) -> float:
+    """Para cálculos: convierte a número; PM o vacío -> 0.0."""
     if v is None:
         return 0.0
     s = str(v).strip().replace(",", ".")
@@ -64,14 +78,20 @@ def normalize_df(records: List[Dict[str, Any]]) -> pd.DataFrame:
             "CÓDIGO DE DOSÍMETRO": str(f.get("CÓDIGO DE DOSÍMETRO") or "").strip(),
             "NOMBRE": f.get("NOMBRE"),
             "CÉDULA": f.get("CÉDULA"),
+            "FECHA DE NACIMIENTO": f.get("FECHA DE NACIMIENTO"),
             "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
             "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
-            "Hp (10)": as_float(f.get("Hp (10)")),
-            "Hp (0.07)": as_float(f.get("Hp (0.07)")),
-            "Hp (3)": as_float(f.get("Hp (3)")),
+            # RAW (para mostrar, conserva PM)
+            "Hp10_RAW": as_value(f.get("Hp (10)")),
+            "Hp007_RAW": as_value(f.get("Hp (0.07)")),
+            "Hp3_RAW": as_value(f.get("Hp (3)")),
+            # NUM (para cálculo)
+            "Hp10_NUM": as_num(f.get("Hp (10)")),
+            "Hp007_NUM": as_num(f.get("Hp (0.07)")),
+            "Hp3_NUM": as_num(f.get("Hp (3)")),
         })
     df = pd.DataFrame(rows)
-    # fecha a datetime (acepta 08/08/2025 11:26, etc.)
+    # Parseo de fecha/hora
     if "FECHA DE LECTURA" in df.columns:
         df["FECHA_DE_LECTURA_DT"] = pd.to_datetime(
             df["FECHA DE LECTURA"].apply(
@@ -90,50 +110,51 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Reporte"):
     out.seek(0)
     return out
 
-# Detecta la(s) columna(s) con códigos en un archivo de dosis
-CAND_COLS = ["CÓDIGO DE DOSÍMETRO","CODIGO DE DOSIMETRO","CODIGO","CÓDIGO","DOSIMETRO","DOSÍMETRO","WB","COD. DOSÍMETRO"]
+def read_codes_from_files(files) -> Set[str]:
+    """Lee CSV/Excel y extrae códigos de dosímetro (columna candidata o patrón WB\d+)."""
+    codes: Set[str] = set()
+    for f in files:
+        raw = f.read()
+        f.seek(0)
+        name = f.name.lower()
+        df = None
+        try:
+            if name.endswith((".xlsx", ".xls")):
+                df = pd.read_excel(BytesIO(raw))
+            else:
+                # autodetecta separador/encoding
+                for enc in ("utf-8-sig", "latin-1"):
+                    try:
+                        df = pd.read_csv(BytesIO(raw), sep=None, engine="python", encoding=enc)
+                        break
+                    except Exception:
+                        continue
+                if df is None:
+                    df = pd.read_csv(BytesIO(raw))
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
 
-def read_codes_from_file(file) -> Set[str]:
-    name = file.name.lower()
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        df = pd.read_excel(file)
-    else:
-        # CSV robusto (utf-8 / latin-1 / ; / ,)
-        content = file.read()
-        for enc in ("utf-8-sig", "latin-1"):
-            try:
-                df = pd.read_csv(BytesIO(content), encoding=enc, sep=None, engine="python")
-                break
-            except Exception:
-                continue
-        else:
-            df = pd.read_csv(BytesIO(content))  # último intento estándar
-    cols = [c for c in df.columns]
-    # intenta por nombre
-    target = None
-    for c in cols:
-        if any(k.lower() in str(c).lower() for k in CAND_COLS):
-            target = c
-            break
-    # si no encontró, prueba patrones de tipo WB000123 en todo el DF
-    if target is None:
-        for c in cols:
-            if df[c].astype(str).str.contains(r"^WB\d{5,}$", case=False, na=False).any():
-                target = c
-                break
-    if target is None:
-        # cae a primera columna
-        target = cols[0]
-    codes = (
-        df[target]
-        .astype(str)
-        .str.strip()
-        .str.replace("\u200b", "", regex=False)  # zero-width si viniera pegado
-        .replace({"nan": ""})
-    )
-    return set([c for c in codes if c])
+        # Buscar columna por nombre
+        cand = None
+        for c in df.columns:
+            cl = str(c).lower()
+            if any(k in cl for k in ["dosim", "código", "codigo", "wb", "dosímetro", "dosimetro"]):
+                cand = c; break
+        # Si no la encontró, buscar patrón tipo WB000123
+        if cand is None:
+            for c in df.columns:
+                if df[c].astype(str).str.contains(r"^WB\d{5,}$", case=False, na=False).any():
+                    cand = c; break
+        if cand is None:
+            cand = df.columns[0]
 
-# ----------------- Carga Ninox -----------------
+        col = df[cand].astype(str).str.strip()
+        codes |= set([c for c in col if c and c.lower() != "nan"])
+    return codes
+
+# ------------------- Carga Ninox -------------------
 with st.spinner("Cargando datos desde Ninox…"):
     recs = fetch_all_records(TABLE_ID)
     base = normalize_df(recs)
@@ -142,137 +163,163 @@ if base.empty:
     st.warning("No hay registros en la tabla REPORTE.")
     st.stop()
 
-# ----------------- Sidebar -----------------
+# ------------------- Sidebar -------------------
 with st.sidebar:
     st.header("Filtros")
-    st.caption("Sube uno o varios **archivos de dosis** (CSV/Excel) para filtrar por códigos.")
-    files = st.file_uploader("Archivos de dosis", type=["csv","xlsx","xls"], accept_multiple_files=True)
+    files = st.file_uploader("Archivos de dosis (para filtrar)", type=["csv", "xlsx", "xls"], accept_multiple_files=True)
 
-    # Periodo actual: por defecto el más reciente (excluye CONTROL)
-    periodos_validos = base.loc[base["PERIODO DE LECTURA"].notna(), "PERIODO DE LECTURA"].astype(str)
-    periodos_validos = [p for p in periodos_validos.unique().tolist() if p.strip().upper() != "CONTROL"]
+    # periodos válidos (excluye CONTROL para selección)
+    per_order = (base.groupby("PERIODO DE LECTURA")["FECHA_DE_LECTURA_DT"].max()
+                 .sort_values(ascending=False).index.astype(str).tolist())
+    per_valid = [p for p in per_order if p.strip().upper() != "CONTROL"]
 
-    # Ordena periodos por la última lectura dentro de cada periodo
-    per_orden = (
-        base.groupby("PERIODO DE LECTURA")["FECHA_DE_LECTURA_DT"].max()
-        .sort_values(ascending=False)
-        .index.astype(str).tolist()
-    )
-    per_orden = [p for p in per_orden if p in periodos_validos]
-
-    periodo_actual = st.selectbox("Periodo actual", per_orden, index=0 if per_orden else None)
+    periodo_actual = st.selectbox("Periodo actual", per_valid, index=0 if per_valid else None)
     periodos_anteriores = st.multiselect(
-        "Periodos anteriores (a sumar para 'Anual')",
-        [p for p in per_orden if p != periodo_actual],
-        default=[p for p in per_orden[1:2]]  # por defecto, el inmediatamente anterior
+        "Periodos anteriores (para ANUAL)",
+        [p for p in per_valid if p != periodo_actual],
+        default=[per_valid[1]] if len(per_valid) > 1 else []
     )
 
-    st.caption("Opcional: filtra también por **Compañía** o **Tipo de dosímetro**")
-    companias = ["(todas)"] + sorted([c for c in base["COMPAÑÍA"].dropna().astype(str).unique()])
-    compania_sel = st.selectbox("Compañía", companias, index=0)
-    tipos = ["(todos)"] + sorted([c for c in base["TIPO DE DOSÍMETRO"].dropna().astype(str).unique()])
-    tipo_sel = st.selectbox("Tipo de dosímetro", tipos, index=0)
+    comp_opts = ["(todas)"] + sorted(base["COMPAÑÍA"].dropna().astype(str).unique().tolist())
+    compania = st.selectbox("Compañía", comp_opts, index=0)
+    tipo_opts = ["(todos)"] + sorted(base["TIPO DE DOSÍMETRO"].dropna().astype(str).unique().tolist())
+    tipo = st.selectbox("Tipo de dosímetro", tipo_opts, index=0)
 
-# ----------------- Aplicar filtros por archivos -----------------
+# Filtro por archivos
 codes_filter: Optional[Set[str]] = None
 if files:
-    codes: Set[str] = set()
-    for f in files:
-        try:
-            codes |= read_codes_from_file(f)
-        except Exception as e:
-            st.warning(f"No pude leer '{f.name}': {e}")
-    if codes:
-        codes_filter = set([c.strip() for c in codes if c.strip()])
-        st.success(f"Códigos detectados para filtrar: {len(codes_filter)}")
+    codes_filter = read_codes_from_files(files)
+    if codes_filter:
+        st.success(f"Códigos detectados en archivos: {len(codes_filter)}")
 
 df = base.copy()
 if codes_filter:
     df = df[df["CÓDIGO DE DOSÍMETRO"].isin(codes_filter)]
-if compania_sel != "(todas)":
-    df = df[df["COMPAÑÍA"].astype(str) == compania_sel]
-if tipo_sel != "(todos)":
-    df = df[df["TIPO DE DOSÍMETRO"].astype(str) == tipo_sel]
+if compania != "(todas)":
+    df = df[df["COMPAÑÍA"].astype(str) == compania]
+if tipo != "(todos)":
+    df = df[df["TIPO DE DOSÍMETRO"].astype(str) == tipo]
 
 if df.empty:
-    st.warning("No hay registros que cumplan los filtros.")
+    st.warning("No hay registros que cumplan el filtro.")
     st.stop()
 
-# ----------------- Cálculos -----------------
-# Actual: para cada código, toma el registro más reciente DENTRO del periodo_actual
-df_actual = (
-    df[df["PERIODO DE LECTURA"].astype(str) == str(periodo_actual)]
-    .sort_values(["CÓDIGO DE DOSÍMETRO","FECHA_DE_LECTURA_DT"], ascending=[True, False])
-    .groupby("CÓDIGO DE DOSÍMETRO", as_index=False)
-    .first()
-    .rename(columns={
-        "Hp (10)": "Hp10_ACTUAL",
-        "Hp (0.07)": "Hp007_ACTUAL",
-        "Hp (3)": "Hp3_ACTUAL",
-        "FECHA DE LECTURA": "FECHA_LECTURA_ACTUAL"
-    })
-)
+# ---- Identificar CONTROL (por nombre) y opción manual
+control_codes = set(df.loc[df["NOMBRE"].astype(str).str.strip().str.upper() == "CONTROL",
+                           "CÓDIGO DE DOSÍMETRO"].unique())
+all_codes = sorted(df["CÓDIGO DE DOSÍMETRO"].unique().tolist())
+manual_control = st.sidebar.selectbox("Código CONTROL (manual, opcional)", ["(auto)"] + all_codes, index=0)
+if manual_control != "(auto)":
+    control_codes.add(manual_control)
 
-# Anteriores: suma por código en los periodos seleccionados
-df_prev_sum = (
-    df[df["PERIODO DE LECTURA"].astype(str).isin([str(p) for p in periodos_anteriores])]
-    .groupby("CÓDIGO DE DOSÍMETRO", as_index=False)[["Hp (10)","Hp (0.07)","Hp (3)"]]
-    .sum()
-    .rename(columns={
-        "Hp (10)": "Hp10_ANTERIOR_SUM",
-        "Hp (0.07)": "Hp007_ANTERIOR_SUM",
-        "Hp (3)": "Hp3_ANTERIOR_SUM"
-    })
-)
+# ------------------- Cálculos -------------------
+def ultimo_en_periodo(g: pd.DataFrame, periodo: str) -> pd.Series:
+    x = g[g["PERIODO DE LECTURA"].astype(str) == str(periodo)].sort_values("FECHA_DE_LECTURA_DT", ascending=False)
+    return x.iloc[0] if not x.empty else pd.Series(dtype="object")
 
-# Vida: suma histórica sobre todos los periodos (para el filtro aplicado)
-df_vida = (
-    df.groupby("CÓDIGO DE DOSÍMETRO", as_index=False)[["Hp (10)","Hp (0.07)","Hp (3)"]]
-    .sum()
-    .rename(columns={
-        "Hp (10)": "Hp10_VIDA",
-        "Hp (0.07)": "Hp007_VIDA",
-        "Hp (3)": "Hp3_VIDA"
+# Actual: último por código dentro del periodo actual
+rows = []
+for code, sub in df.groupby("CÓDIGO DE DOSÍMETRO", as_index=False):
+    ult = ultimo_en_periodo(sub, periodo_actual)
+    if ult.empty:
+        continue
+    rows.append({
+        "CÓDIGO DE DOSÍMETRO": code,
+        "PERIODO DE LECTURA": periodo_actual,
+        "COMPAÑÍA": ult.get("COMPAÑÍA"),
+        "NOMBRE": ult.get("NOMBRE"),
+        "CÉDULA": ult.get("CÉDULA"),
+        "FECHA DE NACIMIENTO": ult.get("FECHA DE NACIMIENTO"),
+        "FECHA Y HORA DE LECTURA": ult.get("FECHA DE LECTURA"),
+        "TIPO DE DOSÍMETRO": ult.get("TIPO DE DOSÍMETRO"),
+        # RAW (mostrar)
+        "Hp10_ACTUAL":  ult.get("Hp10_RAW"),
+        "Hp007_ACTUAL": ult.get("Hp007_RAW"),
+        "Hp3_ACTUAL":   ult.get("Hp3_RAW"),
+        # NUM (calcular)
+        "Hp10_ACTUAL_NUM":  ult.get("Hp10_NUM", 0.0),
+        "Hp007_ACTUAL_NUM": ult.get("Hp007_NUM", 0.0),
+        "Hp3_ACTUAL_NUM":   ult.get("Hp3_NUM", 0.0),
     })
-)
+df_actual = pd.DataFrame(rows)
+
+# Suma de periodos anteriores (para ANUAL)
+df_prev = df[df["PERIODO DE LECTURA"].astype(str).isin(periodos_anteriores)]
+prev_sum = (df_prev.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_NUM", "Hp007_NUM", "Hp3_NUM"]]
+            .sum()
+            .rename(columns={"Hp10_NUM": "Hp10_ANT_SUM",
+                             "Hp007_NUM": "Hp007_ANT_SUM",
+                             "Hp3_NUM": "Hp3_ANT_SUM"}))
+
+# Suma de por vida (histórico, con filtros aplicados)
+vida_sum = (df.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_NUM", "Hp007_NUM", "Hp3_NUM"]]
+            .sum()
+            .rename(columns={"Hp10_NUM": "Hp10_VIDA",
+                             "Hp007_NUM": "Hp007_VIDA",
+                             "Hp3_NUM": "Hp3_VIDA"}))
 
 # Unir
-out = df_actual.merge(df_prev_sum, on="CÓDIGO DE DOSÍMETRO", how="left").merge(df_vida, on="CÓDIGO DE DOSÍMETRO", how="left")
-for col in ["Hp10_ANTERIOR_SUM","Hp007_ANTERIOR_SUM","Hp3_ANTERIOR_SUM","Hp10_VIDA","Hp007_VIDA","Hp3_VIDA"]:
-    if col not in out:
-        out[col] = 0.0
-    out[col] = out[col].fillna(0.0)
+out = (df_actual.set_index("CÓDIGO DE DOSÍMETRO")
+       .join(prev_sum, how="left")
+       .join(vida_sum, how="left")).reset_index()
 
-# Anual = Actual + suma anteriores
-out["Hp10_ANUAL"]  = out["Hp10_ACTUAL"].fillna(0.0)  + out["Hp10_ANTERIOR_SUM"]
-out["Hp007_ANUAL"] = out["Hp007_ACTUAL"].fillna(0.0) + out["Hp007_ANTERIOR_SUM"]
-out["Hp3_ANUAL"]   = out["Hp3_ACTUAL"].fillna(0.0)   + out["Hp3_ANTERIOR_SUM"]
+for c in ["Hp10_ANT_SUM", "Hp007_ANT_SUM", "Hp3_ANT_SUM", "Hp10_VIDA", "Hp007_VIDA", "Hp3_VIDA"]:
+    if c not in out:
+        out[c] = 0.0
+    out[c] = out[c].fillna(0.0)
 
-# Redondeo 2 decimales
-num_cols = ["Hp10_ACTUAL","Hp007_ACTUAL","Hp3_ACTUAL","Hp10_ANUAL","Hp007_ANUAL","Hp3_ANUAL","Hp10_VIDA","Hp007_VIDA","Hp3_VIDA"]
-for c in num_cols:
-    if c in out.columns:
-        out[c] = out[c].apply(round2)
+# ANUAL = ACTUAL + ANTERIORES (numéricos)
+out["Hp10_ANUAL"]  = out["Hp10_ACTUAL_NUM"]  + out["Hp10_ANT_SUM"]
+out["Hp007_ANUAL"] = out["Hp007_ACTUAL_NUM"] + out["Hp007_ANT_SUM"]
+out["Hp3_ANUAL"]   = out["Hp3_ACTUAL_NUM"]   + out["Hp3_ANT_SUM"]
 
-# Columnas de contexto (nombre, cédula, compañía, tipo)
-context_cols = ["CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA","COMPAÑÍA","TIPO DE DOSÍMETRO","PERIODO DE LECTURA","FECHA_LECTURA_ACTUAL"]
-# PERIODO DE LECTURA en df_actual es el actual; renombra para claridad
-out = out.rename(columns={"PERIODO DE LECTURA": "PERIODO_ACTUAL"})
+# Redondeos de numéricos
+for c in ["Hp10_ANUAL", "Hp007_ANUAL", "Hp3_ANUAL", "Hp10_VIDA", "Hp007_VIDA", "Hp3_VIDA"]:
+    out[c] = out[c].apply(round2)
 
-# Reordenar
+# Mantener PM en ACTUAL (si el RAW era PM); si no, mostrar número redondeado
+def show_raw_or_num(raw):
+    return raw if str(raw).upper() == "PM" else round2(float(raw))
+
+out["Hp10_ACTUAL"]  = out["Hp10_ACTUAL"].apply(show_raw_or_num)
+out["Hp007_ACTUAL"] = out["Hp007_ACTUAL"].apply(show_raw_or_num)
+out["Hp3_ACTUAL"]   = out["Hp3_ACTUAL"].apply(show_raw_or_num)
+
+# CONTROL primero
+out["__is_control"] = out["CÓDIGO DE DOSÍMETRO"].isin(control_codes)
+out = out.sort_values(["__is_control", "CÓDIGO DE DOSÍMETRO"], ascending=[False, True])
+
+# Renombrar a encabezados finales
+rename_map = {
+    "Hp10_ACTUAL":  "Hp (10) ACTUAL",
+    "Hp007_ACTUAL": "Hp (0.07) ACTUAL",
+    "Hp3_ACTUAL":   "Hp (3) ACTUAL",
+    "Hp10_ANUAL":   "Hp (10) ANUAL",
+    "Hp007_ANUAL":  "Hp (0.07) ANUAL",
+    "Hp3_ANUAL":    "Hp (3) ANUAL",
+    "Hp10_VIDA":    "Hp (10) VIDA",
+    "Hp007_VIDA":   "Hp (0.07) VIDA",
+    "Hp3_VIDA":     "Hp (3) VIDA",
+}
+out = out.rename(columns=rename_map)
+
+# Orden final de columnas según tu plantilla
 final_cols = [
-    "CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA","COMPAÑÍA","TIPO DE DOSÍMETRO",
-    "PERIODO_ACTUAL","FECHA_LECTURA_ACTUAL",
-    "Hp10_ACTUAL","Hp007_ACTUAL","Hp3_ACTUAL",
-    "Hp10_ANUAL","Hp007_ANUAL","Hp3_ANUAL",
-    "Hp10_VIDA","Hp007_VIDA","Hp3_VIDA"
+    "PERIODO DE LECTURA", "COMPAÑÍA", "CÓDIGO DE DOSÍMETRO", "NOMBRE", "CÉDULA",
+    "FECHA DE NACIMIENTO", "FECHA Y HORA DE LECTURA", "TIPO DE DOSÍMETRO",
+    "Hp (10) ACTUAL", "Hp (0.07) ACTUAL", "Hp (3) ACTUAL",
+    "Hp (10) ANUAL", "Hp (0.07) ANUAL", "Hp (3) ANUAL",
+    "Hp (10) VIDA", "Hp (0.07) VIDA", "Hp (3) VIDA",
 ]
-out = out[[c for c in final_cols if c in out.columns]].sort_values("CÓDIGO DE DOSÍMETRO")
+for c in final_cols:
+    if c not in out.columns:
+        out[c] = ""
+out = out[final_cols]
 
+# ------------------- Mostrar / Descargar -------------------
 st.subheader("Reporte final")
 st.dataframe(out, use_container_width=True, hide_index=True)
 
-# Descargas
 csv_bytes = out.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "⬇️ Descargar CSV (UTF-8 con BOM)",
@@ -280,6 +327,7 @@ st.download_button(
     file_name=f"reporte_dosimetria_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
     mime="text/csv"
 )
+
 xlsx_bytes = to_excel_bytes(out)
 st.download_button(
     "⬇️ Descargar Excel",
@@ -290,11 +338,9 @@ st.download_button(
 
 with st.expander("Notas"):
     st.markdown("""
-- **PM** se trata como **0.00**.
-- *Periodo actual* toma **el registro más reciente por dosímetro** dentro del periodo elegido.
-- *Anual* = Actual + **suma** de todos los registros en los *Periodos anteriores seleccionados*.
-- *De por vida* = suma de **todas** las lecturas históricas (según los filtros activos).
-- Puedes subir **varios archivos**; se unifican todos los códigos detectados para filtrar.
+- **PM** se mantiene en las columnas **ACTUAL**; para **ANUAL** y **VIDA** se considera como **0.00** para las sumas.
+- **ANUAL** = último valor del periodo seleccionado (**ACTUAL**) + **suma** de los periodos anteriores seleccionados.
+- **VIDA** = suma histórica de todas las lecturas (con los filtros activos).
+- La fila **CONTROL** (si existe) se muestra primero.
 """)
-
 
