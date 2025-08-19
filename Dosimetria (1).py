@@ -1,5 +1,27 @@
 import streamlit as st
 
+# ========== LOGIN ==========
+USUARIOS = {
+    "Mispanama": "Maxilo2000",
+    "usuario1": "password123"
+}
+if "autenticado" not in st.session_state:
+    st.session_state["autenticado"] = False
+if not st.session_state["autenticado"]:
+    st.markdown("<h2 style='text-align:center; color:#1c6758'>Acceso</h2>", unsafe_allow_html=True)
+    usuario = st.text_input("Usuario")
+    password = st.text_input("Contraseña", type="password")
+    if st.button("Ingresar"):
+        if usuario in USUARIOS and password == USUARIOS[usuario]:
+            st.session_state["autenticado"] = True
+            st.rerun()
+        else:
+            st.error("Usuario o contraseña incorrectos.")
+    st.stop()
+if st.sidebar.button("Cerrar sesión"):
+    st.session_state["autenticado"] = False
+    st.rerun()
+
 # ===================== CONFIG GLOBAL DE LA APP =====================
 st.set_page_config(page_title="Microsievert - Dosimetría", page_icon="🧪", layout="wide")
 
@@ -1170,3 +1192,4 @@ with tab2:
         file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
