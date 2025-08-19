@@ -91,10 +91,15 @@ def normalize_df(records):
             lambda x: dtparse(str(x), dayfirst=True) if pd.notna(x) and str(x).strip() != "" else pd.NaT
         ), errors="coerce"
     )
+    # ID de persona = NOMBRE normalizado + CÉDULA
+    def _n(x): 
+        import re
+        return re.sub(r"\s+", " ", str(x or "").strip()).upper()
+    df["PERSON_ID"] = df.apply(lambda r: f"{_n(r['NOMBRE'])}|{str(r['CÉDULA'] or '').strip().upper()}", axis=1)
     return df
 
 def read_codes_from_files(files) -> Set[str]:
-    """Lee CSV/Excel y extrae códigos (columna candidata o patrón WB\d+)."""
+    """Lee CSV/Excel y extrae códigos (columna candidata o patrón WB\\d+)."""
     codes: Set[str] = set()
     from io import BytesIO
     for f in files:
@@ -189,56 +194,49 @@ if df.empty:
     st.warning("No hay registros que cumplan el filtro.")
     st.stop()
 
-# ---- Identificar CONTROL (por nombre) ----
-control_codes = set(df.loc[df["NOMBRE"].astype(str).str.strip().str.upper()=="CONTROL",
-                           "CÓDIGO DE DOSÍMETRO"].unique())
+# ------------------- Cálculos POR PERSONA -------------------
+# Última lectura del periodo actual por PERSONA (NOMBRE + CÉDULA).
+def latest_in_period_by_person(sub_df: pd.DataFrame, periodo: str) -> pd.DataFrame:
+    x = sub_df[sub_df["PERIODO DE LECTURA"].astype(str) == str(periodo)].copy()
+    if x.empty: 
+        return pd.DataFrame(columns=sub_df.columns.tolist() + ["PERSON_ID"])
+    x = x.sort_values("FECHA_DE_LECTURA_DT", ascending=False)
+    keep_cols = list(sub_df.columns)
+    out = x.groupby("PERSON_ID", as_index=False).first()[keep_cols + ["PERSON_ID"]]
+    return out
 
-# ------------------- Cálculos -------------------
-def ultimo_en_periodo(g: pd.DataFrame, periodo: str) -> pd.Series:
-    x = g[g["PERIODO DE LECTURA"].astype(str) == str(periodo)].sort_values("FECHA_DE_LECTURA_DT", ascending=False)
-    return x.iloc[0] if not x.empty else pd.Series(dtype="object")
+# ACTUAL por persona
+df_actual = latest_in_period_by_person(df, periodo_actual)
 
-# ACTUAL: último por código en el periodo actual
-rows = []
-for code, sub in df.groupby("CÓDIGO DE DOSÍMETRO", as_index=False):
-    ult = ultimo_en_periodo(sub, periodo_actual)
-    if ult.empty: continue
-    rows.append({
-        "CÓDIGO DE DOSÍMETRO": code,
-        "PERIODO DE LECTURA": periodo_actual,
-        "COMPAÑÍA": ult.get("COMPAÑÍA"),
-        "NOMBRE": ult.get("NOMBRE"),
-        "CÉDULA": ult.get("CÉDULA"),
-        "FECHA Y HORA DE LECTURA": ult.get("FECHA DE LECTURA"),
-        "TIPO DE DOSÍMETRO": ult.get("TIPO DE DOSÍMETRO"),
-        # Mostrar / Calcular
-        "Hp10_ACTUAL_RAW":  ult.get("Hp10_RAW"),
-        "Hp007_ACTUAL_RAW": ult.get("Hp007_RAW"),
-        "Hp3_ACTUAL_RAW":   ult.get("Hp3_RAW"),
-        "Hp10_ACTUAL_NUM":  ult.get("Hp10_NUM", 0.0),
-        "Hp007_ACTUAL_NUM": ult.get("Hp007_NUM", 0.0),
-        "Hp3_ACTUAL_NUM":   ult.get("Hp3_NUM", 0.0),
-    })
-df_actual = pd.DataFrame(rows)
+# Sumas de periodos anteriores por persona (para ANUAL)
+df_prev = df[df["PERIODO DE LECTURA"].astype(str).isin(periodos_anteriores)].copy()
+prev_sum = (df_prev.groupby("PERSON_ID")[["Hp10_NUM","Hp007_NUM","Hp3_NUM"]]
+            .sum()
+            .rename(columns={"Hp10_NUM":"Hp10_ANT_SUM","Hp007_NUM":"Hp007_ANT_SUM","Hp3_NUM":"Hp3_ANT_SUM"}))
 
-# Suma de periodos anteriores (para ANUAL)
-df_prev = df[df["PERIODO DE LECTURA"].astype(str).isin(periodos_anteriores)]
-prev_sum = (df_prev.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_NUM","Hp007_NUM","Hp3_NUM"]]
-            .sum().rename(columns={"Hp10_NUM":"Hp10_ANT_SUM","Hp007_NUM":"Hp007_ANT_SUM","Hp3_NUM":"Hp3_ANT_SUM"}))
+# VIDA por persona (todas las lecturas con los filtros)
+vida_sum = (df.groupby("PERSON_ID")[["Hp10_NUM","Hp007_NUM","Hp3_NUM"]]
+            .sum()
+            .rename(columns={"Hp10_NUM":"Hp10_VIDA_NUM","Hp007_NUM":"Hp007_VIDA_NUM","Hp3_NUM":"Hp3_VIDA_NUM"}))
+vida_raw = (df.groupby("PERSON_ID")[["Hp10_RAW","Hp007_RAW","Hp3_RAW"]]
+            .agg(list)
+            .rename(columns={"Hp10_RAW":"Hp10_VIDA_RAW","Hp007_RAW":"Hp007_VIDA_RAW","Hp3_RAW":"Hp3_VIDA_RAW"}))
 
-# VIDA (histórico con filtros)
-vida_sum = (df.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_NUM","Hp007_NUM","Hp3_NUM"]]
-            .sum().rename(columns={"Hp10_NUM":"Hp10_VIDA_NUM","Hp007_NUM":"Hp007_VIDA_NUM","Hp3_NUM":"Hp3_VIDA_NUM"}))
-vida_raw = (df.groupby("CÓDIGO DE DOSÍMETRO")[["Hp10_RAW","Hp007_RAW","Hp3_RAW"]]
-            .agg(list).rename(columns={"Hp10_RAW":"Hp10_VIDA_RAW","Hp007_RAW":"Hp007_VIDA_RAW","Hp3_RAW":"Hp3_VIDA_RAW"}))
-
-# Unir
-out = (df_actual.set_index("CÓDIGO DE DOSÍMETRO")
+# Unir todo sobre PERSON_ID (solo personas con lectura en periodo actual)
+out = (df_actual.set_index("PERSON_ID")
        .join(prev_sum, how="left")
        .join(vida_sum, how="left")
-       .join(vida_raw, how="left")
-       ).reset_index()
+       .join(vida_raw, how="left")).reset_index()
 
+# Si no hay lecturas actuales, avisar
+if out.empty:
+    if codes_filter:
+        st.info(f"No hay lecturas en **{periodo_actual}** para los códigos filtrados.")
+    else:
+        st.info(f"No hay lecturas en **{periodo_actual}** con los filtros elegidos.")
+    st.stop()
+
+# Rellenos
 for c in ["Hp10_ANT_SUM","Hp007_ANT_SUM","Hp3_ANT_SUM","Hp10_VIDA_NUM","Hp007_VIDA_NUM","Hp3_VIDA_NUM"]:
     if c not in out: out[c] = 0.0
     out[c] = out[c].fillna(0.0)
@@ -246,26 +244,30 @@ for c in ["Hp10_ANT_SUM","Hp007_ANT_SUM","Hp3_ANT_SUM","Hp10_VIDA_NUM","Hp007_VI
 # ---- Columnas de salida (PM donde corresponde) ----
 def show_raw_or_num(raw): return raw if str(raw).upper()=="PM" else round2(float(raw))
 
-out["Hp (10) ACTUAL"]   = out["Hp10_ACTUAL_RAW"].apply(show_raw_or_num)
-out["Hp (0.07) ACTUAL"] = out["Hp007_ACTUAL_RAW"].apply(show_raw_or_num)
-out["Hp (3) ACTUAL"]    = out["Hp3_ACTUAL_RAW"].apply(show_raw_or_num)
+out["Hp (10) ACTUAL"]   = out["Hp10_RAW"].apply(show_raw_or_num)
+out["Hp (0.07) ACTUAL"] = out["Hp007_RAW"].apply(show_raw_or_num)
+out["Hp (3) ACTUAL"]    = out["Hp3_RAW"].apply(show_raw_or_num)
 
-out["Hp (10) ANUAL"]   = out.apply(lambda r: pm_or_sum([r["Hp10_ACTUAL_RAW"]], r["Hp10_ACTUAL_NUM"] + r["Hp10_ANT_SUM"]), axis=1)
-out["Hp (0.07) ANUAL"] = out.apply(lambda r: pm_or_sum([r["Hp007_ACTUAL_RAW"]], r["Hp007_ACTUAL_NUM"] + r["Hp007_ANT_SUM"]), axis=1)
-out["Hp (3) ANUAL"]    = out.apply(lambda r: pm_or_sum([r["Hp3_ACTUAL_RAW"]],  r["Hp3_ACTUAL_NUM"]  + r["Hp3_ANT_SUM"]), axis=1)
+out["Hp (10) ANUAL"]   = out.apply(lambda r: pm_or_sum([r["Hp10_RAW"]], r["Hp10_NUM"] + r["Hp10_ANT_SUM"]), axis=1)
+out["Hp (0.07) ANUAL"] = out.apply(lambda r: pm_or_sum([r["Hp007_RAW"]], r["Hp007_NUM"] + r["Hp007_ANT_SUM"]), axis=1)
+out["Hp (3) ANUAL"]    = out.apply(lambda r: pm_or_sum([r["Hp3_RAW"]],  r["Hp3_NUM"]  + r["Hp3_ANT_SUM"]), axis=1)
 
 out["Hp (10) VIDA"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_VIDA_RAW", []) or [], r["Hp10_VIDA_NUM"]), axis=1)
 out["Hp (0.07) VIDA"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_VIDA_RAW", []) or [], r["Hp007_VIDA_NUM"]), axis=1)
 out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_VIDA_RAW", []) or [],  r["Hp3_VIDA_NUM"]), axis=1)
 
-# CONTROL primero
-out["__is_control"] = out["CÓDIGO DE DOSÍMETRO"].isin(control_codes)
-out = out.sort_values(["__is_control","CÓDIGO DE DOSÍMETRO"], ascending=[False, True])
+# Setear periodo, limpiar "CONTROL nan"
+out["PERIODO DE LECTURA"] = periodo_actual
+out["NOMBRE"] = out["NOMBRE"].apply(lambda s: "CONTROL" if str(s).strip().upper().startswith("CONTROL") else s)
 
-# ---- Columnas finales ----
+# Orden: CONTROL primero (por nombre)
+out["__is_control"] = out["NOMBRE"].astype(str).str.strip().str.upper().eq("CONTROL")
+out = out.sort_values(["__is_control","NOMBRE","CÉDULA"], ascending=[False, True, True])
+
+# ---- Columnas finales (dejamos el código del último dosímetro del periodo actual) ----
 FINAL_COLS = [
     "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-    "FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
+    "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
     "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
     "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
     "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
@@ -274,13 +276,31 @@ for c in FINAL_COLS:
     if c not in out.columns: out[c] = ""
 out = out[FINAL_COLS]
 
-# ------------------- Vista previa -------------------
+# Renombrar para la vista/Excel como en tu plantilla
+out = out.rename(columns={"FECHA DE LECTURA": "FECHA Y HORA DE LECTURA"})
+
+# ------------------- Vista previa (formato como antes) -------------------
+DOSE_COLS = [
+    "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
+    "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+    "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
+]
+def fmt_pm_2d(v):
+    s = str(v).strip()
+    if s.upper() == "PM": return "PM"
+    try: return f"{float(s):.2f}"
+    except Exception: return s if s else ""
+
+display_df = out.copy()
+for c in DOSE_COLS:
+    display_df[c] = display_df[c].apply(fmt_pm_2d)
+
 st.subheader("Reporte final (vista previa)")
-st.dataframe(out, use_container_width=True, hide_index=True)
+st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 # ------------------- Descargas -------------------
 # CSV
-csv_bytes = out.to_csv(index=False).encode("utf-8-sig")
+csv_bytes = display_df.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "⬇️ Descargar CSV (UTF-8 con BOM)",
     data=csv_bytes,
@@ -295,7 +315,7 @@ def to_excel_simple(df: pd.DataFrame, sheet_name="Reporte"):
         df.to_excel(w, index=False, sheet_name=sheet_name)
     bio.seek(0); return bio.getvalue()
 
-xlsx_simple = to_excel_simple(out)
+xlsx_simple = to_excel_simple(display_df)
 st.download_button(
     "⬇️ Descargar Excel (tabla simple)",
     data=xlsx_simple,
@@ -401,7 +421,7 @@ def build_formatted_excel(df_final: pd.DataFrame,
     ws["A6"].font = Font(bold=True, size=14)
     ws["A6"].alignment = center
 
-    # Bloques (cerrados con borde exactamente sobre sus columnas)
+    # Bloques
     ws.merge_cells("H7:J7"); ws["H7"] = "DOSIS ACTUAL (mSv)"
     ws.merge_cells("K7:M7"); ws["K7"] = "DOSIS ANUAL (mSv)"
     ws.merge_cells("N7:P7"); ws["N7"] = "DOSIS DE POR VIDA (mSv)"
@@ -433,18 +453,18 @@ def build_formatted_excel(df_final: pd.DataFrame,
         ws.append(list(r.values))
     last_row = ws.max_row
 
-    # Bordes, alineación y ALTURA UNIFORME de todas las filas de datos
+    # Bordes, alineación y altura uniforme
     for row in ws.iter_rows(min_row=header_row, max_row=last_row, min_col=1, max_col=len(headers)):
         for cell in row:
             cell.border = border
             if cell.row >= start_row:
                 cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
     for rr in range(start_row, last_row + 1):
-        ws.row_dimensions[rr].height = 20  # ajusta a 22 o 24 si quieres más espacio
+        ws.row_dimensions[rr].height = 20
 
     ws.freeze_panes = f"A{start_row}"
 
-    # Auto ancho (respetando máximos)
+    # Auto ancho
     for col_cells in ws.iter_cols(min_col=1, max_col=16, min_row=header_row, max_row=last_row):
         col_letter = get_column_letter(col_cells[0].column)
         max_len = max(len("" if c.value is None else str(c.value)) for c in col_cells)
@@ -599,12 +619,11 @@ def build_formatted_excel(df_final: pd.DataFrame,
 header_lines = [header_line1, header_line2, header_line3, header_line4]
 logo_bytes = logo_file.read() if logo_file is not None else None
 
-xlsx_fmt = build_formatted_excel(out.copy(), header_lines, logo_bytes)
+xlsx_fmt = build_formatted_excel(display_df.copy(), header_lines, logo_bytes)
 st.download_button(
     "⬇️ Descargar Excel (formato plantilla)",
     data=xlsx_fmt,
     file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-
 
