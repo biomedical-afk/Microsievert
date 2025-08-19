@@ -1,5 +1,4 @@
-# app.py
-# -*- coding: utf-8 -*-
+
 import re
 import io
 import requests
@@ -797,5 +796,6 @@ with tab2:
         ws.merge_cells(f"A{row}:P{row}"); ws[f"A{row}"] = (
             "POR DEBAJO DEL MÍNIMO DETECTADO: las dosis por debajo del mínimo se reportan como “PM”."
         )
+
 
 
