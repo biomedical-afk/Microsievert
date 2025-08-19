@@ -430,7 +430,7 @@ def fit_logo(ws, logo_bytes: bytes, top_left: str = "C1", bottom_right: str = "F
     tl_col = column_index_from_string(''.join([c for c in top_left if c.isalpha()]))
     tl_row = int(''.join([c for c in top_left if c.isdigit()]))
     br_col = column_index_from_string(''.join([c for c in bottom_right if c.isalpha()]))
-    br_row = int('''.join([c for c in bottom_right if c.isdigit()]))
+    br_row = int(''.join([c for c in bottom_right if c.isdigit()]))
 
     box_w = sum(col_pixels(ws, get_column_letter(c)) for c in range(tl_col, br_col + 1))
     box_h = sum(row_pixels(ws, r) for r in range(tl_row, br_row + 1))
@@ -714,3 +714,4 @@ st.download_button(
     file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
