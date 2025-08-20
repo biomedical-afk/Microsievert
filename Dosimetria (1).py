@@ -52,7 +52,7 @@ with tab1:
     DEFAULT_REPORT_TABLE_ID = "C"   # REPORTE
 
     # ===================== STREAMLIT =====================
-    st.title("🧪 Sistema de Gestión de Dosimetría — Microsievert")
+    st.title("🧪 Sistema de Gestión de Dosimetría")
     st.caption("Ninox + Procesamiento VALOR − CONTROL + Exportación y Carga a Ninox")
 
     if "df_final" not in st.session_state:
@@ -1192,4 +1192,5 @@ with tab2:
         file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
