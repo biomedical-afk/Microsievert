@@ -489,25 +489,40 @@ def row_pixels(ws, row_idx: int) -> int:
 
 def fit_logo(ws, logo_bytes: bytes, top_left: str = "C1", bottom_right: str = "F4", padding: int = 6):
     """Escala y coloca el logo dentro del rectángulo top_left..bottom_right conservando proporción."""
-    if not logo_bytes: return
+    if not logo_bytes:
+        return
+
     img = XLImage(BytesIO(logo_bytes))
 
-    tl_col = column_index_from_string(''.join([c for c in top_left if c.isalpha()]))
-    tl_row = int(''.join([c for c in top_left if c.isdigit()]))
-    br_col = column_index_from_string(''.join([c for c in bottom_right if c.isalpha()]))
-    br_row = int(''.njoin([c for c in bottom_right if c.isdigit()]))  # <-- ojo: corregimos abajo
+    # Helpers para parsear coordenadas tipo "C1"
+    def parse_cell(cell_ref: str):
+        letters = ''.join([c for c in cell_ref if c.isalpha()]) or "A"
+        digits  = ''.join([c for c in cell_ref if c.isdigit()]) or "1"
+        col_idx = column_index_from_string(letters.upper())
+        row_idx = int(digits)
+        return col_idx, row_idx
 
-    # CORRECCIÓN: la línea anterior tenía un typo '.njoin'; debe ser '.join'
-    br_row = int(''.join([c for c in bottom_right if c.isdigit()]))
+    tl_col, tl_row = parse_cell(top_left)
+    br_col, br_row = parse_cell(bottom_right)
 
+    # Asegurar orden correcto (por si vienen invertidos)
+    if br_col < tl_col: tl_col, br_col = br_col, tl_col
+    if br_row < tl_row: tl_row, br_row = br_row, tl_row
+
+    # Tamaño del “box” en pixeles, a partir de anchos/altos de OpenPyXL
     box_w = sum(col_pixels(ws, get_column_letter(c)) for c in range(tl_col, br_col + 1))
     box_h = sum(row_pixels(ws, r) for r in range(tl_row, br_row + 1))
 
-    max_w = max(10, box_w - 2*padding)
-    max_h = max(10, box_h - 2*padding)
+    max_w = max(10, box_w - 2 * padding)
+    max_h = max(10, box_h - 2 * padding)
 
-    scale = min(max_w / img.width, max_h / img.height, 1.0)
-    img.width = int(img.width * scale)
+    # Escala proporcional (no agrandar si ya es más pequeño)
+    try:
+        scale = min(max_w / float(img.width), max_h / float(img.height), 1.0)
+    except Exception:
+        scale = 1.0
+
+    img.width  = int(img.width  * scale)
     img.height = int(img.height * scale)
     img.anchor = top_left
     ws.add_image(img)
