@@ -204,11 +204,7 @@ with st.sidebar:
                  .sort_values(ascending=False).index.astype(str).tolist())
     per_valid = [p for p in per_order if p.strip().upper() != "CONTROL"]
     periodo_actual = st.selectbox("Periodo actual", per_valid, index=0 if per_valid else None)
-    periodos_anteriores = st.multiselect(
-        "Periodos anteriores (para ANUAL)",
-        [p for p in per_valid if p != periodo_actual],
-        default=[per_valid[1]] if len(per_valid) > 1 else []
-    )
+
     comp_opts = ["(todas)"] + sorted(base["COMPAÑÍA"].dropna().astype(str).unique().tolist())
     compania = st.selectbox("Compañía", comp_opts, index=0)
     tipo_opts = ["(todos)"] + sorted(base["TIPO DE DOSÍMETRO"].dropna().astype(str).unique().tolist())
@@ -233,25 +229,35 @@ if df.empty:
     st.warning("No hay registros que cumplan el filtro.")
     st.stop()
 
+# === EXCLUIR CONTROL DE LOS CÁLCULOS (pero luego lo mostraremos primero si existe) ===
+df["__is_control_row"] = df["NOMBRE"].fillna("").astype(str).str.strip().str.upper().eq("CONTROL")
+df = df[~df["__is_control_row"]].copy()
+
 # ------------------- Cálculos POR PERSONA (NOMBRE + CÉDULA) -------------------
 keys = ["NOMBRE_NORM", "CÉDULA_NORM"]
 
-# ACTUAL: sumar todas las filas de la persona en el periodo actual
+# 0) Determinar el año objetivo a partir del 'periodo_actual'
+df_periodo = df[df["PERIODO DE LECTURA"].astype(str) == str(periodo_actual)].copy()
+if df_periodo.empty:
+    st.warning("No hay filas en el periodo actual seleccionado.")
+    st.stop()
+year_target = df_periodo["FECHA_DE_LECTURA_DT"].dt.year.max()
+
+# 1) ACTUAL: sumar SOLO el periodo_actual por persona
 df_curr = df[df["PERIODO DE LECTURA"].astype(str) == str(periodo_actual)].copy()
 df_curr = df_curr.sort_values("FECHA_DE_LECTURA_DT")  # para que 'last' sea el más reciente
 gb_curr_sum = df_curr.groupby(keys, as_index=False).agg({
     "PERIODO DE LECTURA": "last",
     "COMPAÑÍA": "last",
-    "CÓDIGO DE DOSÍMETRO": "last",  # solo para referencia (último usado)
+    "CÓDIGO DE DOSÍMETRO": "last",
     "NOMBRE": "last",
     "CÉDULA": "last",
-    "FECHA_DE_LECTURA_DT": "max",   # la más reciente
+    "FECHA_DE_LECTURA_DT": "max",
     "TIPO DE DOSÍMETRO": "last",
     "Hp10_NUM": "sum",
     "Hp007_NUM": "sum",
     "Hp3_NUM": "sum",
 })
-# Listas de RAW para PM en ACTUAL
 gb_curr_raw = df_curr.groupby(keys).agg({
     "Hp10_RAW": list,
     "Hp007_RAW": list,
@@ -262,39 +268,39 @@ gb_curr_raw = df_curr.groupby(keys).agg({
     "Hp3_RAW": "Hp3_ACTUAL_RAW_LIST"
 }).reset_index()
 
-out = gb_curr_sum.merge(gb_curr_raw, on=keys, how="left")
-out = out.rename(columns={
+out = gb_curr_sum.merge(gb_curr_raw, on=keys, how="left").rename(columns={
     "Hp10_NUM": "Hp10_ACTUAL_NUM_SUM",
     "Hp007_NUM": "Hp007_ACTUAL_NUM_SUM",
     "Hp3_NUM": "Hp3_ACTUAL_NUM_SUM",
 })
 
-# PREV: suma de periodos anteriores por persona
-df_prev = df[df["PERIODO DE LECTURA"].astype(str).isin(periodos_anteriores)].copy()
-gb_prev_sum = df_prev.groupby(keys).agg({
+# 2) ANUAL (automático): todas las filas del MISMO AÑO del periodo actual
+df_year = df[df["FECHA_DE_LECTURA_DT"].dt.year == year_target].copy()
+
+gb_year_sum = df_year.groupby(keys, as_index=False).agg({
     "Hp10_NUM": "sum",
     "Hp007_NUM": "sum",
     "Hp3_NUM": "sum"
 }).rename(columns={
-    "Hp10_NUM": "Hp10_PREV_NUM_SUM",
-    "Hp007_NUM": "Hp007_PREV_NUM_SUM",
-    "Hp3_NUM": "Hp3_PREV_NUM_SUM",
-}).reset_index()
+    "Hp10_NUM": "Hp10_YEAR_NUM_SUM",
+    "Hp007_NUM": "Hp007_YEAR_NUM_SUM",
+    "Hp3_NUM": "Hp3_YEAR_NUM_SUM",
+})
 
-gb_prev_raw = df_prev.groupby(keys).agg({
+gb_year_raw = df_year.groupby(keys).agg({
     "Hp10_RAW": list,
     "Hp007_RAW": list,
     "Hp3_RAW": list
 }).rename(columns={
-    "Hp10_RAW": "Hp10_PREV_RAW_LIST",
-    "Hp007_RAW": "Hp007_PREV_RAW_LIST",
-    "Hp3_RAW": "Hp3_PREV_RAW_LIST"
+    "Hp10_RAW": "Hp10_YEAR_RAW_LIST",
+    "Hp007_RAW": "Hp007_YEAR_RAW_LIST",
+    "Hp3_RAW": "Hp3_YEAR_RAW_LIST"
 }).reset_index()
 
-out = out.merge(gb_prev_sum, on=keys, how="left").merge(gb_prev_raw, on=keys, how="left")
+out = out.merge(gb_year_sum, on=keys, how="left").merge(gb_year_raw, on=keys, how="left")
 
-# VIDA: todo el historial por persona
-gb_life_sum = df.groupby(keys).agg({
+# 3) VIDA (todo el historial de la persona)
+gb_life_sum = df.groupby(keys, as_index=False).agg({
     "Hp10_NUM": "sum",
     "Hp007_NUM": "sum",
     "Hp3_NUM": "sum"
@@ -302,7 +308,7 @@ gb_life_sum = df.groupby(keys).agg({
     "Hp10_NUM": "Hp10_LIFE_NUM_SUM",
     "Hp007_NUM": "Hp007_LIFE_NUM_SUM",
     "Hp3_NUM": "Hp3_LIFE_NUM_SUM",
-}).reset_index()
+})
 
 gb_life_raw = df.groupby(keys).agg({
     "Hp10_RAW": list,
@@ -319,7 +325,7 @@ out = out.merge(gb_life_sum, on=keys, how="left").merge(gb_life_raw, on=keys, ho
 # Rellenos numéricos
 for c in [
     "Hp10_ACTUAL_NUM_SUM","Hp007_ACTUAL_NUM_SUM","Hp3_ACTUAL_NUM_SUM",
-    "Hp10_PREV_NUM_SUM","Hp007_PREV_NUM_SUM","Hp3_PREV_NUM_SUM",
+    "Hp10_YEAR_NUM_SUM","Hp007_YEAR_NUM_SUM","Hp3_YEAR_NUM_SUM",
     "Hp10_LIFE_NUM_SUM","Hp007_LIFE_NUM_SUM","Hp3_LIFE_NUM_SUM",
 ]:
     if c not in out.columns: out[c] = 0.0
@@ -336,27 +342,18 @@ out["Hp (10) ACTUAL"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_ACTUAL_RAW_L
 out["Hp (0.07) ACTUAL"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_ACTUAL_RAW_LIST", []), r["Hp007_ACTUAL_NUM_SUM"]), axis=1)
 out["Hp (3) ACTUAL"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_ACTUAL_RAW_LIST",  []), r["Hp3_ACTUAL_NUM_SUM"]),  axis=1)
 
-# ANUAL (actual + prev)
+# ANUAL (año del periodo actual)
 out["Hp (10) ANUAL"] = out.apply(
-    lambda r: pm_or_sum(
-        merge_raw_lists(r.get("Hp10_ACTUAL_RAW_LIST"), r.get("Hp10_PREV_RAW_LIST")),
-        float(r["Hp10_ACTUAL_NUM_SUM"]) + float(r["Hp10_PREV_NUM_SUM"])
-    ), axis=1
+    lambda r: pm_or_sum(r.get("Hp10_YEAR_RAW_LIST", []), float(r["Hp10_YEAR_NUM_SUM"])), axis=1
 )
 out["Hp (0.07) ANUAL"] = out.apply(
-    lambda r: pm_or_sum(
-        merge_raw_lists(r.get("Hp007_ACTUAL_RAW_LIST"), r.get("Hp007_PREV_RAW_LIST")),
-        float(r["Hp007_ACTUAL_NUM_SUM"]) + float(r["Hp007_PREV_NUM_SUM"])
-    ), axis=1
+    lambda r: pm_or_sum(r.get("Hp007_YEAR_RAW_LIST", []), float(r["Hp007_YEAR_NUM_SUM"])), axis=1
 )
 out["Hp (3) ANUAL"] = out.apply(
-    lambda r: pm_or_sum(
-        merge_raw_lists(r.get("Hp3_ACTUAL_RAW_LIST"), r.get("Hp3_PREV_RAW_LIST")),
-        float(r["Hp3_ACTUAL_NUM_SUM"]) + float(r["Hp3_PREV_NUM_SUM"])
-    ), axis=1
+    lambda r: pm_or_sum(r.get("Hp3_YEAR_RAW_LIST", []), float(r["Hp3_YEAR_NUM_SUM"])), axis=1
 )
 
-# VIDA
+# VIDA (todo el historial)
 out["Hp (10) VIDA"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_LIFE_RAW_LIST", []), r["Hp10_LIFE_NUM_SUM"]), axis=1)
 out["Hp (0.07) VIDA"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_LIFE_RAW_LIST", []), r["Hp007_LIFE_NUM_SUM"]), axis=1)
 out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_LIFE_RAW_LIST",  []), r["Hp3_LIFE_NUM_SUM"]),  axis=1)
@@ -365,7 +362,7 @@ out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_LIFE_RAW_LIST",
 out["FECHA Y HORA DE LECTURA"] = out["FECHA_DE_LECTURA_DT"].apply(fmt_fecha)
 out["PERIODO DE LECTURA"] = periodo_actual
 
-# CONTROL primero (si existe una persona llamada CONTROL)
+# Orden (CONTROL al inicio si existe)
 out["__is_control"] = out["NOMBRE"].fillna("").astype(str).str.strip().str.upper().eq("CONTROL")
 out = out.sort_values(["__is_control","NOMBRE","CÉDULA"], ascending=[False, True, True])
 
@@ -713,6 +710,7 @@ st.download_button(
     file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
 
 
 
