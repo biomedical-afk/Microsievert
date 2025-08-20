@@ -28,7 +28,7 @@ DATABASE_ID = "ksqzvuts5aq0"
 BASE_URL    = "https://api.ninox.com/v1"
 
 # IDs por defecto
-DEFAULT_BASE_TABLE_ID   = "E"   # BASE DE DATOS
+DEFAULT_BASE_TABLE_ID   = "I"   # BASE DE DATOS
 DEFAULT_REPORT_TABLE_ID = "C"   # REPORTE
 
 # ===================== STREAMLIT (global) =====================
@@ -1125,3 +1125,4 @@ with tab2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="tab2_dl_xlsx_fmt"
     )
+
