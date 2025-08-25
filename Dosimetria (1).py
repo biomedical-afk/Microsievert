@@ -101,7 +101,7 @@ def ninox_get_table_fields(team_id: str, db_id: str, table_id: str):
 
 # ===================== Utilidades genéricas =====================
 def round2(x: float) -> float:
-    return float(f"{x:.2f}")
+    return float(f"{x:.2f}") if pd.notna(x) else 0.0
 
 # --------- Helpers para reporte (parte 2) ---------
 def as_value(v: Any):
@@ -665,6 +665,27 @@ with tab1:
         st.error(f"Error leyendo BASE DE DATOS: {e}")
         df_participantes = None
 
+    # --- Selector de PERIODO (Sistema 1) desde BASE: PERIODO 1..5 ---
+    # (Se muestra si hay BASE; si el usuario elige algo distinto de "— TODOS —", se usa esa elección)
+    if df_participantes is not None and not df_participantes.empty:
+        per_cols = [c for c in df_participantes.columns if str(c).upper().startswith("PERIODO")]
+        if per_cols:
+            vals = pd.concat([df_participantes[c].astype(str) for c in per_cols], ignore_index=True)
+
+            def norm_per(x: str) -> str:
+                s = (x or "").strip().upper()
+                s = re.sub(r'\.+$', '', s)
+                return s
+
+            periodos = sorted({norm_per(x) for x in vals if str(x).strip() and str(x).strip().upper() != "NAN"})
+            # CONTROL primero si existe
+            if "CONTROL" in periodos:
+                periodos = ["CONTROL"] + [p for p in periodos if p != "CONTROL"]
+            opciones_periodo = ["— TODOS —"] + periodos
+            per_sel = st.selectbox("🗓️ Elegir PERIODO (Sistema 1)", opciones_periodo, index=0, key="tab1_per_sel")
+            if per_sel and per_sel != "— TODOS —":
+                periodo_filtro = per_sel  # sobrescribe el filtro de texto
+
     st.markdown("#### Archivo de Dosis")
     upload = st.file_uploader("Selecciona CSV/XLS/XLSX", type=["csv","xls","xlsx"], key="tab1_upl")
     df_dosis = leer_dosis(upload) if upload else None
@@ -1125,4 +1146,5 @@ with tab2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="tab2_dl_xlsx_fmt"
     )
+
 
